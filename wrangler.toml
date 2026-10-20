@@ -1,0 +1,20 @@
+name = "jansang-motion-api"
+main = "api/worker.mjs"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGIN = "https://yebe9.github.io"
+GEMINI_MODEL = "gemini-2.5-flash"
+
+# Store the key with `npx wrangler secret put GEMINI_API_KEY`, never in this file.
+# Namespace IDs only need to be unique within your Cloudflare account.
+[[ratelimits]]
+name = "ANALYSIS_LIMITER"
+namespace_id = "102001"
+simple = { limit = 6, period = 60 }
+
+[[ratelimits]]
+name = "TOTAL_LIMITER"
+namespace_id = "102002"
+simple = { limit = 30, period = 60 }

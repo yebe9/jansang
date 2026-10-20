@@ -1,0 +1,370 @@
+/* Webcam pose input for JANSANG.
+ *
+ * Usage:
+ *   const camera = new JansangPoseCamera({ video, overlay, onFrame, onStatus });
+ *   await camera.start(); // true when ready, false when cancelled by stop()
+ *   camera.stop();        // releases webcam tracks and the detector immediately
+ *
+ * video: HTMLVideoElement; overlay: HTMLCanvasElement laid over that video.
+ * Both should fill the same box. This module uses object-fit: contain, mirrors
+ * the video, and paints the matching mirrored skeleton into the overlay.
+ * onFrame({ landmarks, timestamp }): <= 15 callbacks/sec, performance.now() in ms;
+ * landmarks is a fresh array of 33 { x, y, z, visibility } objects in MediaPipe
+ * index order. x is mirrored; x/y are clamped to [0, 1]. Low-confidence / absent
+ * people produce []. Consumers must also check each joint's visibility >= 0.5.
+ * onStatus({ kind, message }): loading | ready | tracking | missing | error.
+ * start() rejects an Error with a Korean message after emitting error status.
+ * stop() is idempotent, including during pending permission or model downloads.
+ *
+ * Frames stay in the browser. No video recording, audio, upload, or storage.
+ * This module only downloads the public library/WASM/model assets below.
+ * MediaPipe Tasks Vision is Apache-2.0:
+ * https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE
+ * API: https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker/web_js
+ * Synchronous inference is throttled on the main thread, using the Lite model
+ * and a small camera frame. A worker is a future performance improvement.
+ */
+(() => {
+  'use strict';
+
+  const PACKAGE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32';
+  const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+  const FRAME_INTERVAL = 1000 / 15;
+  const MIN_VISIBILITY = 0.5;
+  const BODY_CONNECTIONS = [
+    [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+    [11, 23], [12, 24], [23, 24], [23, 25], [25, 27],
+    [24, 26], [26, 28], [27, 29], [29, 31], [27, 31],
+    [28, 30], [30, 32], [28, 32]
+  ];
+  const clamp = value => Math.max(0, Math.min(1, value));
+  let visionPromise;
+
+  function loadVision() {
+    if (!visionPromise) {
+      visionPromise = import(`${PACKAGE}/vision_bundle.mjs`).catch(error => {
+        visionPromise = null;
+        throw error;
+      });
+    }
+    return visionPromise;
+  }
+
+  function abortError() {
+    return new DOMException('Camera start cancelled', 'AbortError');
+  }
+
+  // Promise.race alone leaves listeners behind. Clean up after every outcome.
+  function cancellable(promise, signal, timeout, timeoutMessage) {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) { reject(abortError()); return; }
+      let timer;
+      const finish = (fn, result) => {
+        signal.removeEventListener('abort', onAbort);
+        clearTimeout(timer);
+        fn(result);
+      };
+      const onAbort = () => finish(reject, abortError());
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (timeout) timer = setTimeout(() => finish(reject, new Error(timeoutMessage)), timeout);
+      Promise.resolve(promise).then(value => finish(resolve, value), error => finish(reject, error));
+    });
+  }
+
+  function stopTracks(stream) {
+    if (stream) stream.getTracks().forEach(track => track.stop());
+  }
+
+  function closeDetector(detector) {
+    if (detector) {
+      try { detector.close(); } catch (_) { /* Already released by the browser. */ }
+    }
+  }
+
+  function friendlyError(error) {
+    switch (error && error.name) {
+      case 'NotAllowedError':
+      case 'PermissionDeniedError':
+        return '카메라 권한이 꺼져 있어요. 브라우저의 카메라 권한을 허용한 뒤 다시 시작해 주세요.';
+      case 'NotFoundError':
+      case 'DevicesNotFoundError':
+        return '연결된 카메라를 찾지 못했어요. 카메라를 연결하거나 마우스로 그려 주세요.';
+      case 'NotReadableError':
+      case 'TrackStartError':
+        return '카메라를 열지 못했어요. 카메라를 사용 중인 다른 앱을 닫고 다시 시작해 주세요.';
+      case 'OverconstrainedError':
+        return '이 카메라에서는 요청한 영상 설정을 사용할 수 없어요. 다른 카메라나 브라우저를 사용해 주세요.';
+      case 'SecurityError':
+        return '현재 브라우저에서 카메라 접근이 차단되어 있어요. HTTPS 페이지에서 다시 열어 주세요.';
+      default:
+        return error && /[가-힣]/.test(error.message)
+          ? error.message
+          : '동작 인식 모델을 불러오지 못했어요. 인터넷 연결을 확인하고 최신 Chrome 또는 Edge에서 다시 시작해 주세요.';
+    }
+  }
+
+  class JansangPoseCamera {
+    constructor({ video, overlay, onFrame = () => {}, onStatus = () => {} }) {
+      if (!video || !overlay) throw new Error('카메라 미리보기 요소가 필요해요.');
+      this.video = video;
+      this.overlay = overlay;
+      this.context = overlay.getContext('2d');
+      this.onFrame = onFrame;
+      this.onStatus = onStatus;
+      this._generation = 0;
+      this._raf = 0;
+      this._stream = null;
+      this._detector = null;
+      this._controller = null;
+      this._trackListeners = [];
+      this._smoothed = null;
+      this._status = '';
+      this._lastPoseTime = -Infinity;
+      this._lastInference = -Infinity;
+      this._lastVideoTime = -1;
+      this._stalled = false;
+      this.video.muted = true;
+      this.video.autoplay = true;
+      this.video.playsInline = true;
+      this.video.setAttribute('playsinline', '');
+      this.video.setAttribute('muted', '');
+      this.video.style.transform = 'scaleX(-1)';
+      this.video.style.objectFit = 'contain';
+      this.overlay.style.objectFit = 'contain';
+      this.overlay.style.transform = 'none';
+    }
+
+    _emitStatus(kind, message) {
+      const key = `${kind}:${message}`;
+      if (this._status === key) return;
+      this._status = key;
+      this.onStatus({ kind, message });
+    }
+
+    async start() {
+      this.stop();
+      const generation = this._generation;
+      const controller = new AbortController();
+      const current = () => generation === this._generation && !controller.signal.aborted;
+      this._controller = controller;
+      this._status = '';
+      this._emitStatus('loading', '카메라 권한을 확인하고 있어요.');
+      try {
+        if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+          throw new Error('이 브라우저에서는 카메라를 사용할 수 없어요. HTTPS 주소 또는 localhost에서 열어 주세요.');
+        }
+
+        const streamPromise = navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: 'user',
+            width: { ideal: 640, max: 960 },
+            height: { ideal: 480, max: 720 },
+            frameRate: { ideal: 15, max: 30 }
+          }
+        });
+        // getUserMedia cannot be aborted. Release a stream that arrives late.
+        streamPromise.then(stream => { if (!current()) stopTracks(stream); }, () => {});
+        const stream = await cancellable(streamPromise, controller.signal);
+        if (!current()) { stopTracks(stream); return false; }
+        this._stream = stream;
+        for (const track of stream.getVideoTracks()) {
+          const ended = () => {
+            if (!current()) return;
+            this.stop();
+            this._emitStatus('error', '카메라 연결이 끊어졌어요. 연결을 확인한 뒤 다시 시작해 주세요.');
+          };
+          track.addEventListener('ended', ended);
+          this._trackListeners.push([track, ended]);
+          if (track.readyState === 'ended') throw new Error('카메라 연결이 끊어졌어요. 다시 시작해 주세요.');
+        }
+        this.video.srcObject = stream;
+        await cancellable(this.video.play(), controller.signal, 15000,
+          '카메라 영상을 재생하지 못했어요. 브라우저의 카메라 권한을 확인한 뒤 다시 시작해 주세요.');
+        if (!current()) return false;
+
+        this._emitStatus('loading', '동작 인식 모델을 불러오는 중이에요. 처음에는 잠시 걸릴 수 있어요.');
+        const detectorPromise = this._createDetector(current);
+        detectorPromise.then(detector => { if (!current()) closeDetector(detector); }, () => {});
+        const detector = await cancellable(detectorPromise, controller.signal, 90000,
+          '동작 인식 모델 다운로드가 지연되고 있어요. 인터넷 연결을 확인한 뒤 다시 시작해 주세요.');
+        if (!current()) { closeDetector(detector); return false; }
+        this._detector = detector;
+        this._lastInference = -Infinity;
+        this._lastVideoTime = -1;
+        this._stalled = false;
+        this._emitStatus('ready', '카메라가 준비됐어요. 어깨와 두 손이 화면 안에 보이도록 서 주세요.');
+        if (!current()) return false;
+        this._raf = requestAnimationFrame(timestamp => this._tick(timestamp, generation));
+        return true;
+      } catch (error) {
+        if (!current()) return false;
+        const message = friendlyError(error);
+        this.stop();
+        this._emitStatus('error', message);
+        throw new Error(message);
+      }
+    }
+
+    async _createDetector(current) {
+      const { FilesetResolver, PoseLandmarker } = await loadVision();
+      if (!current()) throw abortError();
+      const fileset = await FilesetResolver.forVisionTasks(`${PACKAGE}/wasm`);
+      if (!current()) throw abortError();
+      const options = {
+        baseOptions: { modelAssetPath: MODEL, delegate: 'GPU' },
+        runningMode: 'VIDEO',
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.55,
+        minPosePresenceConfidence: 0.55,
+        minTrackingConfidence: 0.55,
+        outputSegmentationMasks: false
+      };
+      try {
+        return await PoseLandmarker.createFromOptions(fileset, options);
+      } catch (error) {
+        if (!current()) throw abortError();
+        // Some devices cannot create a second GPU context alongside WebGL art.
+        options.baseOptions.delegate = 'CPU';
+        return PoseLandmarker.createFromOptions(fileset, options);
+      }
+    }
+
+    _tick(timestamp, generation) {
+      if (generation !== this._generation || !this._detector) return;
+      if (timestamp - this._lastInference >= FRAME_INTERVAL &&
+          this.video.readyState >= 2 && this.video.currentTime !== this._lastVideoTime) {
+        this._lastInference = timestamp;
+        this._lastVideoTime = this.video.currentTime;
+        this._stalled = false;
+        let result;
+        try {
+          result = this._detector.detectForVideo(this.video, timestamp);
+          const landmarks = this._filterPose(result.landmarks[0], timestamp);
+          this._draw(landmarks);
+          this._emitStatus(landmarks.length ? 'tracking' : 'missing',
+            landmarks.length
+              ? '움직임을 보고 있어요. 두 손과 어깨가 화면 안에 보이도록 움직여 주세요.'
+              : '몸을 찾고 있어요. 어깨와 두 손이 잘 보이도록 한 걸음 물러나 주세요.');
+          // Consumer may call stop() (e.g. after its ten-second recording).
+          if (generation === this._generation) this.onFrame({ landmarks, timestamp });
+        } catch (_) {
+          if (generation === this._generation) {
+            this.stop();
+            this._emitStatus('error', '동작 인식이 중단됐어요. 카메라를 다시 시작하거나 마우스로 그려 주세요.');
+          }
+        } finally {
+          if (result?.close) result.close();
+        }
+      } else if (!this._stalled && timestamp - this._lastInference > 750) {
+        // A camera can stop delivering frames without ending its track (e.g.
+        // another app temporarily takes it). Pause the consumer's recording
+        // clock rather than counting frozen video as observed movement.
+        this._stalled = true;
+        this._smoothed = null;
+        this._draw([]);
+        this._emitStatus('missing', '카메라 영상을 기다리고 있어요. 다른 앱에서 카메라를 사용 중인지 확인해 주세요.');
+        if (generation === this._generation) this.onFrame({ landmarks: [], timestamp });
+      }
+      if (generation === this._generation) {
+        this._raf = requestAnimationFrame(next => this._tick(next, generation));
+      }
+    }
+
+    _filterPose(raw, timestamp) {
+      const visible = index => raw?.[index] &&
+        Number.isFinite(raw[index].x) && Number.isFinite(raw[index].y) &&
+        raw[index].x >= 0 && raw[index].x <= 1 &&
+        raw[index].y >= 0 && raw[index].y <= 1 &&
+        (raw[index].visibility ?? 0) >= MIN_VISIBILITY;
+      // Need a credible upper body and one visible wrist. Never manufacture a
+      // continuing trajectory from a lost / occluded joint.
+      if (!raw || raw.length < 33 || !visible(11) || !visible(12) ||
+          !(visible(15) || visible(16))) {
+        this._smoothed = null;
+        return [];
+      }
+      const previous = timestamp - this._lastPoseTime < 300 ? this._smoothed : null;
+      const smoothed = raw.map((landmark, index) => {
+        const finite = Number.isFinite(landmark.x) && Number.isFinite(landmark.y);
+        const x = finite ? clamp(1 - landmark.x) : 0.5;
+        const y = finite ? clamp(landmark.y) : 0.5;
+        const z = Number.isFinite(landmark.z) ? landmark.z : 0;
+        const inFrame = finite && landmark.x >= 0 && landmark.x <= 1 &&
+          landmark.y >= 0 && landmark.y <= 1;
+        const visibility = inFrame ? clamp(landmark.visibility ?? 0) : 0;
+        const last = previous?.[index];
+        // Modest smoothing suppresses jitter without hiding sharp gestures.
+        const alpha = last && last.visibility >= MIN_VISIBILITY &&
+          visibility >= MIN_VISIBILITY ? 0.65 : 1;
+        return {
+          x: last ? last.x + alpha * (x - last.x) : x,
+          y: last ? last.y + alpha * (y - last.y) : y,
+          z: last ? last.z + alpha * (z - last.z) : z,
+          visibility
+        };
+      });
+      this._lastPoseTime = timestamp;
+      this._smoothed = smoothed;
+      return smoothed.map(point => ({ ...point }));
+    }
+
+    _draw(landmarks) {
+      const context = this.context;
+      if (!context) return;
+      const width = this.video.videoWidth || 640;
+      const height = this.video.videoHeight || 480;
+      if (this.overlay.width !== width || this.overlay.height !== height) {
+        this.overlay.width = width;
+        this.overlay.height = height;
+      }
+      context.clearRect(0, 0, width, height);
+      const isVisible = point => point && point.visibility >= MIN_VISIBILITY;
+      context.lineWidth = Math.max(2, width / 250);
+      context.lineCap = 'round';
+      context.strokeStyle = 'rgba(169, 218, 196, 0.85)';
+      for (const [from, to] of BODY_CONNECTIONS) {
+        const a = landmarks[from];
+        const b = landmarks[to];
+        if (!isVisible(a) || !isVisible(b)) continue;
+        context.beginPath();
+        context.moveTo(a.x * width, a.y * height);
+        context.lineTo(b.x * width, b.y * height);
+        context.stroke();
+      }
+      // Draw body joints only; facial landmarks are never rendered.
+      for (let index = 11; index < landmarks.length; index++) {
+        const point = landmarks[index];
+        if (!isVisible(point)) continue;
+        const wrist = index === 15 || index === 16;
+        context.fillStyle = wrist ? '#edab8d' : '#dcebe4';
+        context.beginPath();
+        context.arc(point.x * width, point.y * height, wrist ? 6 : 3, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+
+    stop() {
+      this._generation++;
+      if (this._controller) this._controller.abort();
+      this._controller = null;
+      cancelAnimationFrame(this._raf);
+      this._raf = 0;
+      for (const [track, ended] of this._trackListeners) {
+        track.removeEventListener('ended', ended);
+      }
+      this._trackListeners = [];
+      stopTracks(this._stream);
+      this._stream = null;
+      this.video.pause();
+      this.video.srcObject = null;
+      closeDetector(this._detector);
+      this._detector = null;
+      this._smoothed = null;
+      this._lastPoseTime = -Infinity;
+      if (this.context) this.context.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    }
+  }
+
+  window.JansangPoseCamera = JansangPoseCamera;
+})();

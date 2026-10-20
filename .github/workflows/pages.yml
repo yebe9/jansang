@@ -23,8 +23,15 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Check JavaScript syntax
-        run: node --check dist/app.js
+        run: |
+          for file in dist/*.js api/*.mjs server.cjs; do node --check "$file"; done
+      - name: Test motion and API boundaries
+        run: node --test tests/*.test.cjs
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload website

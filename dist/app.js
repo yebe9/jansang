@@ -26,7 +26,23 @@
   let playbackRate = 1;
   let dirty = true;
   let intendedFeeling = '';
-  let showComparisonDemo = false;
+  let inputMode = 'pointer';
+  let captureSource = 'pointer';
+  let camera = null;
+  let cameraKind = 'loading';
+  let cameraMessage = '';
+  let cameraReady = false;
+  let cameraRequested = false;
+  let poseFrames = [];
+  let poseSegment = 0;
+  let wristTracks = new Map();
+  let analysis = null;
+  let analysisKind = 'local';
+  let motionReport = null;
+  let analysisMessage = '';
+  let analysisBusy = false;
+  let analysisController = null;
+  let takeId = 0;
   let gl, program, buffer, position, color, edge, opacity;
   let lost = false;
   const STRIDE = 7;
@@ -127,21 +143,25 @@
     dirty = false;
     if (!points.length) return;
     const visible = [];
+    const lastByStroke = new Map();
+    const interpolated = new Set();
     for (let i = 0; i < points.length; i++) {
       const p = points[i];
-      if (p.t <= cursor) visible.push(p);
-      else {
-        const prev = points[i - 1];
-        if (prev && prev.stroke === p.stroke && cursor > prev.t) {
+      if (p.t <= cursor) {
+        visible.push(p);
+        lastByStroke.set(p.stroke, p);
+      } else if (!interpolated.has(p.stroke)) {
+        const prev = lastByStroke.get(p.stroke);
+        if (prev && cursor > prev.t) {
           const f = (cursor - prev.t) / (p.t - prev.t);
           visible.push({ ...p, x: prev.x + (p.x - prev.x) * f, y: prev.y + (p.y - prev.y) * f, t: cursor });
         }
-        break;
+        interpolated.add(p.stroke);
       }
     }
     const w = stage.clientWidth, h = stage.clientHeight;
     // 결과 화면에서도 기록 당시의 가로세로 비율을 보존한다.
-    if(view === 'result') {
+    if(view === 'result' || captureSource === 'webcam') {
       const sx = Math.min(1,captureAspect/(w/h)) * .88;
       const sy = Math.min(1,(w/h)/captureAspect) * .88;
       for(let i=0;i<visible.length;i++) {
@@ -166,10 +186,11 @@
     }
     // Slow portions have more weight; all points keep their original timing.
     for (const [scale,alpha] of [[5,.055],[2,.12],[.75,.74]]) {
-      for (let i=1; i<visible.length; i++) {
-        const a=visible[i-1],b=visible[i];
-        if(a.stroke !== b.stroke) continue;
-        segment(a,b,strokeWidth * scale * (1.2 - Math.min(b.speed/3,.5)),alpha);
+      const previous = new Map();
+      for (const b of visible) {
+        const a = previous.get(b.stroke);
+        if(a) segment(a,b,strokeWidth * scale * (1.2 - Math.min(b.speed/3,.5)),alpha);
+        previous.set(b.stroke, b);
       }
     }
     // A small cross at the current tip also makes a single click visible.
@@ -196,6 +217,7 @@
     $('drawing-hint').hidden = next !== 'drawing';
     $('tool-rail').hidden = next !== 'drawing';
     $('intro-action').hidden = next !== 'intro';
+    $('camera-panel').hidden = next !== 'drawing' || captureSource !== 'webcam';
     for(const [id,active] of [['step-start',next==='intro'],['step-draw',next==='drawing'],['step-result',result]]) {
       if(active) $(id).setAttribute('aria-current','step');
       else $(id).removeAttribute('aria-current');
@@ -206,37 +228,114 @@
 
   function resetFeelings() {
     intendedFeeling = '';
-    showComparisonDemo = false;
     $('intent-detail').value = '';
     document.querySelectorAll('.feelings button').forEach(b=>b.setAttribute('aria-pressed','false'));
     updateComparison();
   }
 
-  // 화면 프로토타입: API 호출이나 규칙 기반 궤적 해석을 수행하지 않는다.
-  // 예시는 모든 기록에서 동일하며, 사용자의 의도와 무관하게 고정되어 있다.
   function updateComparison() {
     const detail = $('intent-detail').value.trim();
     $('intent-word').textContent = intendedFeeling || (detail ? '나만의 표현' : '선택 전');
     $('intent-summary').textContent = detail || (intendedFeeling ? '내가 이 움직임으로 표현하려던 느낌입니다.' : '표현하려던 느낌을 위에서 남겨주세요.');
     $('feeling-note').textContent = intendedFeeling || detail ? '의도를 남겼어요. 서버로 보내지 않고 이 화면에만 보관합니다.' : '단어를 고르거나 직접 적어주세요. 이 화면에만 남습니다.';
-    $('comparison-demo').hidden = !showComparisonDemo;
-    $('ai-example-badge').hidden = !showComparisonDemo;
-    $('comparison-toggle').setAttribute('aria-expanded', String(showComparisonDemo));
-    $('comparison-toggle').textContent = showComparisonDemo ? '해석 예시 닫기' : 'AI 해석 예시 보기';
-    $('ai-word').textContent = showComparisonDemo ? '망설이는' : '연결 대기';
-    $('ai-summary').textContent = showComparisonDemo ? '비교 UI를 보여주기 위한 고정된 예시 단어입니다.' : 'API 연결 후 실제 해석이 표시될 자리입니다.';
+    const ai = analysisKind === 'ai';
+    $('analysis-badge').textContent = analysisBusy ? 'AI 해석 중' : ai ? 'Gemini 해석' : isExample ? '합성 예시 · 수치 분석' : '기본 수치 분석';
+    $('reading-label').textContent = ai ? '02 / AI READING' : '02 / MOVEMENT READING';
+    $('reading-title').textContent = ai ? 'AI가 읽은 인상' : '움직임의 특징';
+    $('ai-word').textContent = analysis?.impression || '기록 전';
+    $('ai-summary').textContent = analysis?.description || '움직임을 남기면 분석이 시작됩니다.';
+    $('analysis-status').textContent = analysisMessage;
+    $('analysis-evidence').hidden = !analysis;
+    $('analysis-observations').replaceChildren(...(analysis?.observations || []).map(text => {
+      const li = document.createElement('li'); li.textContent = text; return li;
+    }));
+    $('analysis-caveat').textContent = analysis?.caveat || '';
+    $('analyze-button').disabled = analysisBusy || !motionReport?.sufficient;
+    $('analyze-button').textContent = analysisBusy ? '움직임을 읽고 있어요…' : ai ? 'AI로 다시 해석하기 ↗' : 'AI로 움직임 해석하기 ↗';
+    $('analyze-button').setAttribute('aria-busy', String(analysisBusy));
     if (!intendedFeeling && !detail) {
       $('comparison-verdict').textContent = '내 의도를 먼저 남겨보세요.';
-      $('comparison-explanation').textContent = '선택한 표현과 고정된 예시를 나란히 비교합니다.';
-    } else if (!intendedFeeling) {
-      $('comparison-verdict').textContent = '내 문장과 예시를 비교해보세요.';
-      $('comparison-explanation').textContent = '자유롭게 적은 의도는 자동 판정하지 않습니다. 예시 문장과 어떤 점이 다르게 느껴지나요?';
-    } else if (intendedFeeling === '망설이는') {
-      $('comparison-verdict').textContent = '선택한 단어와 예시 단어가 같아요.';
-      $('comparison-explanation').textContent = '둘 다 ‘망설이는’이지만, 같은 이유로 그렇게 느꼈을까요? 실제 AI가 의도를 맞혔다는 뜻은 아닙니다.';
+      $('comparison-explanation').textContent = '해석과 내 의도를 비교해보세요. 같은 움직임의 어떤 부분을 서로 다르게 읽었을까요?';
     } else {
-      $('comparison-verdict').textContent = '서로 다른 단어가 놓였어요.';
-      $('comparison-explanation').textContent = '내 의도는 ‘' + intendedFeeling + '’, 예시는 ‘망설이는’입니다. 실제 해석이 이렇게 다르다면 무엇이 다르게 전달된 걸까요?';
+      $('comparison-verdict').textContent = '내가 담은 느낌과 읽힌 인상';
+      $('comparison-explanation').textContent = '나는 ‘' + (intendedFeeling || detail) + '’을 담았고, ' +
+        (ai ? 'AI는' : '수치 분석은') + ' ‘' + (analysis?.impression || '분석 대기') +
+        '’을 보여줍니다. 움직임에서 읽은 근거와 내 의도 사이에 어떤 차이가 있나요?';
+    }
+  }
+
+  function clearAnalysis() {
+    takeId++;
+    analysisController?.abort();
+    analysisController = null;
+    analysisBusy = false;
+    analysis = null;
+    motionReport = null;
+    analysisKind = 'local';
+    analysisMessage = '';
+  }
+
+  function analyzeMovement() {
+    motionReport = window.JansangMotion.analyze({source:captureSource, points, poseFrames, durationMs:duration, captureAspect});
+    analysis = motionReport.local;
+    analysisKind = 'local';
+    analysisMessage = motionReport.sufficient
+      ? '현재 기록의 속도·멈춤·공간 사용을 계산한 기본 분석입니다. 생성형 AI 해석과는 구분됩니다.'
+      : '분석할 움직임이 짧거나 인식한 관절이 부족합니다. 1초 이상 움직임을 남겨주세요.';
+    updateComparison();
+    if ($('ai-consent').checked && motionReport.sufficient && !isExample) requestAI();
+  }
+
+  function apiBase() {
+    const configured = (window.JANSANG_CONFIG?.apiBase || '').trim().replace(/\/+$/, '');
+    if (configured) {
+      const url = new URL(configured);
+      if (url.protocol !== 'https:') throw new Error('AI 서버 주소는 HTTPS여야 합니다.');
+      return configured;
+    }
+    if (['localhost','127.0.0.1','[::1]'].includes(location.hostname)) return '';
+    throw new Error('AI 서버가 아직 연결되지 않았습니다. 현재는 기본 수치 분석을 볼 수 있어요. Gemini 키와 서버 연결 후 AI 해석이 켜집니다.');
+  }
+
+  async function requestAI() {
+    if (analysisBusy || !motionReport?.sufficient) return;
+    const id = takeId;
+    const controller = new AbortController();
+    analysisController = controller;
+    const timeout = setTimeout(() => controller.abort(), 50000);
+    analysisBusy = true;
+    analysisMessage = '움직임 좌표를 바탕으로 인상을 읽고 있어요. 영상과 내 의도는 보내지 않습니다.';
+    updateComparison();
+    try {
+      const base = apiBase();
+      const response = await fetch(base + '/api/analyze', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(motionReport.payload), signal:controller.signal, credentials:'omit'
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error?.message || 'AI 서버에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.');
+      const result = data?.analysis;
+      if (!result || typeof result.impression !== 'string' || typeof result.description !== 'string' ||
+          !Array.isArray(result.observations) || !result.observations.every(x=>typeof x==='string') ||
+          typeof result.caveat !== 'string') throw new Error('AI 응답 형식을 확인할 수 없습니다. 다시 시도해주세요.');
+      if (id !== takeId) return;
+      analysis = result;
+      analysisKind = 'ai';
+      analysisMessage = (isExample ? '합성 예시 움직임에 대한 ' : '') + 'Gemini가 움직임 정보만 보고 생성한 해석입니다.';
+      announce('AI 해석이 도착했습니다. 내 의도와 비교해보세요.');
+    } catch (error) {
+      if (id !== takeId) return;
+      analysisMessage = (error.name === 'AbortError'
+        ? 'AI 응답 시간이 길어져 요청을 멈췄습니다. 다시 시도할 수 있어요.'
+        : error instanceof TypeError ? 'AI 서버에 연결하지 못했습니다. 인터넷 연결과 서버 설정을 확인해주세요.' : error.message) +
+        (analysisKind === 'ai' ? ' 앞서 받은 해석을 유지합니다.' : ' 아래 결과는 기본 수치 분석입니다.');
+    } finally {
+      clearTimeout(timeout);
+      if (id === takeId) {
+        analysisBusy = false;
+        analysisController = null;
+        updateComparison();
+      }
     }
   }
 
@@ -254,7 +353,7 @@
     $('export').disabled = lost || !hasPoints;
     $('playback-speed').disabled = lost || !hasPoints;
     $('pause-icon').textContent = mode === 'paused' ? '▶' : 'Ⅱ';
-    $('pause-label').textContent = mode === 'paused' ? '이어 그리기' : '일시정지';
+    $('pause-label').textContent = mode === 'paused' ? (captureSource === 'webcam' ? '이어 기록' : '이어 그리기') : '일시정지';
     $('record-time').textContent = timestamp(cursor);
     $('record-progress').value = cursor;
     $('play-icon').textContent = mode === 'playing' ? 'Ⅱ' : '▶';
@@ -274,14 +373,25 @@
       'replay-paused':'PAUSE / 잔상을 바라보는 중',
       complete:isExample ? 'EXAMPLE / 합성 예시 움직임' : 'YOUR TRACE / 당신이 남긴 움직임',
     })[mode];
+    if (captureSource === 'webcam' && view === 'drawing') {
+      if (mode === 'armed') $('stage-status').textContent = cameraRequested ? 'TRACKING / 몸을 찾으면 이어서 기록합니다' : 'READY / 자세를 잡고 기록을 시작하세요';
+      $('camera-status').textContent = cameraMessage;
+      $('camera-record').hidden = cameraRequested || points.length > 0;
+      $('camera-record').disabled = !cameraReady || cameraKind !== 'tracking' || lost;
+    }
     $('stage-guide').hidden = result || mode === 'recording';
     $('stage-guide').classList.toggle('paused',mode === 'paused');
     if(mode === 'paused') {
       $('guide-title').textContent = '잠시 멈춰도 괜찮아요.';
       $('guide-copy').textContent = '시간도 함께 멈췄어요. 이어 그리거나 결과를 만나보세요.';
     } else if(mode === 'armed') {
-      $('guide-title').textContent = hasPoints ? '움직임을 이어가볼까요?' : '여기서, 당신의 움직임을.';
-      $('guide-copy').textContent = '마우스나 손가락을 누른 채 움직여보세요.';
+      if (captureSource === 'webcam') {
+        $('guide-title').textContent = cameraReady ? (cameraRequested ? '당신의 움직임을 기다려요.' : '몸으로 남기는, 작은 잔상.') : '움직임을 만날 준비 중';
+        $('guide-copy').textContent = cameraRequested ? '어깨와 손을 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.' : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
+      } else {
+        $('guide-title').textContent = hasPoints ? '움직임을 이어가볼까요?' : '여기서, 당신의 움직임을.';
+        $('guide-copy').textContent = '마우스나 손가락을 누른 채 움직여보세요.';
+      }
     } else {
       $('guide-title').textContent = '움직임으로 채워질 공간';
       $('guide-copy').textContent = '작은 움직임 하나면 충분해요.';
@@ -296,8 +406,14 @@
 
   function startDrawing() {
     if(lost) return;
+    stopCamera();
+    clearAnalysis();
     dialog.close();
     points=[];
+    poseFrames=[];
+    poseSegment=0;
+    wristTracks.clear();
+    captureSource=inputMode;
     isExample=false;
     elapsed=0;cursor=0;duration=LIMIT;stroke=0;
     mode='armed';
@@ -306,7 +422,109 @@
     captureAspect=stage.clientWidth/stage.clientHeight;
     refresh();render();
     canvas.focus({preventScroll:true});
-    announce('무대를 누르면 기록이 시작됩니다. 최대 10초이며, 일시정지할 수 있습니다.');
+    $('drawing-hint').textContent = captureSource === 'webcam'
+      ? '양손목으로 잔상을 남겨보세요 · 몸을 놓치면 시간도 멈춥니다'
+      : '누른 채 움직여보세요 · 손을 떼면 새로운 획 · Space 일시정지';
+    if (captureSource === 'webcam') startCamera();
+    else announce('무대를 누르면 기록이 시작됩니다. 최대 10초이며, 일시정지할 수 있습니다.');
+  }
+
+  function setInputMode(next) {
+    inputMode = next;
+    $('input-pointer').setAttribute('aria-pressed', String(next === 'pointer'));
+    $('input-webcam').setAttribute('aria-pressed', String(next === 'webcam'));
+    $('input-help').textContent = next === 'webcam'
+      ? '카메라 허용 후 자세를 잡고 시작하세요. 영상은 저장하지 않아요.'
+      : '처음 그리는 순간부터 10초를 기록합니다.';
+    $('start').firstChild.textContent = next === 'webcam' ? '웹캠 준비하기 ' : '시작하기 ';
+  }
+
+  function stopCamera() {
+    camera?.stop();
+    camera = null;
+    cameraReady = false;
+    cameraRequested = false;
+    wristTracks.clear();
+    $('camera-panel').hidden = true;
+  }
+
+  async function startCamera() {
+    const id = takeId;
+    cameraKind = 'loading';
+    cameraMessage = '카메라와 자세 인식 모델을 준비하고 있어요.';
+    cameraReady = false;
+    cameraRequested = false;
+    $('camera-panel').hidden = false;
+    const current = new window.JansangPoseCamera({
+      video:$('camera-video'), overlay:$('camera-overlay'),
+      onStatus(status) {
+        if (id !== takeId || view !== 'drawing') return;
+        cameraKind = status.kind;
+        cameraMessage = status.message;
+        if (status.kind === 'error') {
+          pauseRecording();
+          cameraReady = false;
+        }
+        refresh();
+      },
+      onFrame:receivePose
+    });
+    camera = current;
+    refresh();
+    try {
+      const ready = await current.start();
+      if (id !== takeId || camera !== current || view !== 'drawing') { current.stop(); return; }
+      cameraReady = ready;
+      if (ready) captureAspect = ($('camera-video').videoWidth || 640) / ($('camera-video').videoHeight || 480);
+    } catch (error) {
+      if (id !== takeId || camera !== current) return;
+      cameraMessage = error.message;
+      cameraKind = 'error';
+      cameraReady = false;
+    }
+    refresh();
+  }
+
+  function receivePose({landmarks, timestamp:now}) {
+    if (view !== 'drawing' || captureSource !== 'webcam' || !cameraRequested || lost || mode === 'paused') return;
+    const jointIndices = {leftShoulder:11,rightShoulder:12,leftElbow:13,rightElbow:14,leftWrist:15,rightWrist:16,leftHip:23,rightHip:24};
+    const joints = {};
+    for (const [name,index] of Object.entries(jointIndices)) {
+      const p = landmarks[index];
+      if (p && p.visibility >= .5) joints[name] = [clamp(p.x,0,1), clamp(p.y,0,1)];
+    }
+    if (!joints.leftShoulder || !joints.rightShoulder || (!joints.leftWrist && !joints.rightWrist)) {
+      if (mode === 'recording') {
+        elapsed = recordTime(now);
+        cursor = elapsed;
+        mode = 'armed';
+        wristTracks.clear();
+        refresh();
+      }
+      return;
+    }
+    if (mode === 'armed') {
+      startedAt = now;
+      mode = 'recording';
+      poseSegment++;
+      wristTracks.clear();
+    }
+    if (mode !== 'recording') return;
+    const t = recordTime(now);
+    if (!poseFrames.length || t > poseFrames[poseFrames.length-1].t) poseFrames.push({t,joints,segment:poseSegment});
+    for (const joint of ['leftWrist','rightWrist']) {
+      if (!joints[joint]) { wristTracks.delete(joint); continue; }
+      const [x,y] = joints[joint];
+      const prev = wristTracks.get(joint);
+      const connected = prev && t > prev.t && t-prev.t < 350;
+      const p = {x,y,t,stroke:connected ? prev.stroke : ++stroke,speed:0};
+      if (connected) p.speed = prev.speed*.5 + Math.hypot((x-prev.x)*captureAspect,y-prev.y)/((t-prev.t)/1000)*.5;
+      points.push(p);
+      wristTracks.set(joint,p);
+    }
+    cursor = t;
+    dirty = true;
+    if (t >= LIMIT) finishRecording();
   }
 
   function releasePointer() {
@@ -338,6 +556,7 @@
     releasePointer();
     if(elapsed>=LIMIT) { finishRecording();return; }
     mode='paused';dirty=true;refresh();
+    wristTracks.clear();
     announce('기록을 일시정지했습니다. 멈춘 시간은 기록에 포함되지 않습니다.');
   }
 
@@ -347,7 +566,7 @@
       closeSettings(false);
       mode='armed';refresh();
       canvas.focus({preventScroll:true});
-      announce('무대를 다시 누르면 남은 시간 동안 기록을 이어갑니다.');
+      announce(captureSource === 'webcam' ? '몸이 인식되면 남은 시간 동안 기록을 이어갑니다.' : '무대를 다시 누르면 남은 시간 동안 기록을 이어갑니다.');
     } else pauseRecording();
   }
 
@@ -355,13 +574,14 @@
     setView('result');
     $('result-duration').textContent=(duration/1000).toFixed(1);
     $('result-strokes').textContent=new Set(points.map(p=>p.stroke)).size;
-    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.' : '재생 버튼을 눌러, 당신이 남긴 리듬을 다시 만나보세요.';
+    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.' : captureSource === 'webcam' ? '양손목이 지나간 잔상입니다. 원본 영상은 저장하지 않았어요.' : '재생 버튼을 눌러, 당신이 남긴 리듬을 다시 만나보세요.';
     openResult();
     $('result-panel').scrollTop = 0;
     workspace.scrollTop = 0;
     refresh();render();
     $('result-title').focus({preventScroll:true});
     window.scrollTo(0,0);
+    analyzeMovement();
   }
 
   // 같은 WebGL 캔버스를 팝업 안팎으로 옮겨 기록과 재생 상태를 보존한다.
@@ -392,6 +612,7 @@
     elapsed=duration;cursor=duration;
     releasePointer();
     mode='complete';
+    stopCamera();
     showResult();
     announce('움직임을 기록했습니다. 의도한 느낌을 남기고 비교 화면을 살펴보세요.');
   }
@@ -406,7 +627,7 @@
   function toggleSettings() {
     if(lost || view!=='drawing') return;
     if(!$('settings').hidden) { closeSettings();return; }
-    if(mode==='recording') pauseRecording();
+    if(mode==='recording' || (captureSource==='webcam' && mode==='armed' && points.length)) pauseRecording();
     if(view!=='drawing') return;
     $('settings').hidden=false;
     $('settings-toggle').setAttribute('aria-expanded','true');
@@ -438,7 +659,10 @@
 
   function loadExample() {
     if(lost) return;
+    stopCamera();
+    clearAnalysis();
     dialog.close();
+    captureSource='example';poseFrames=[];
     points=[];isExample=true;duration=LIMIT;cursor=LIMIT;mode='complete';
     captureAspect=1.6;
     for(let i=0;i<=700;i++) {
@@ -454,7 +678,7 @@
   }
 
   canvas.addEventListener('pointerdown',event=>{
-    if(lost || view!=='drawing' || !['armed','recording'].includes(mode) || activePointer!==null || event.button>0 || !$('settings').hidden || dialog.open) return;
+    if(lost || captureSource==='webcam' || view!=='drawing' || !['armed','recording'].includes(mode) || activePointer!==null || event.button>0 || !$('settings').hidden || dialog.open) return;
     event.preventDefault();
     if(mode==='armed') { startedAt=performance.now();mode='recording'; }
     stroke++;activePointer=event.pointerId;
@@ -477,6 +701,25 @@
   resultDialog.addEventListener('cancel',event=>{ event.preventDefault();closeResult(); });
   $('dialog-close').addEventListener('click',()=>dialog.close());
   $('start').addEventListener('click',startDrawing);
+  $('input-pointer').addEventListener('click',()=>setInputMode('pointer'));
+  $('input-webcam').addEventListener('click',()=>setInputMode('webcam'));
+  $('camera-record').addEventListener('click',()=>{
+    if (!cameraReady || cameraKind !== 'tracking') return;
+    closeSettings(false);
+    cameraRequested = true;
+    mode = 'armed';
+    refresh();
+    canvas.focus({preventScroll:true});
+    announce('몸이 인식되면 10초의 움직임을 기록합니다.');
+  });
+  $('camera-cancel').addEventListener('click',()=>{
+    pauseRecording();
+    stopCamera();
+    clearAnalysis();
+    mode='idle';
+    setView('intro');
+    openStart();
+  });
   $('example').addEventListener('click',loadExample);
   $('pause').addEventListener('click',togglePause);
   $('finish').addEventListener('click',finishRecording);
@@ -504,10 +747,7 @@
     updateComparison();
   }));
   $('intent-detail').addEventListener('input',updateComparison);
-  $('comparison-toggle').addEventListener('click',()=>{
-    showComparisonDemo = !showComparisonDemo;
-    updateComparison();
-  });
+  $('analyze-button').addEventListener('click',requestAI);
   $('export').addEventListener('click',()=>{
     if(lost || !points.length) return;
     render();
@@ -536,10 +776,25 @@
   });
   document.addEventListener('visibilitychange',()=>{
     if(!document.hidden) return;
-    if(mode==='recording') pauseRecording();
+    if(mode==='recording' || (captureSource==='webcam' && mode==='armed' && cameraRequested)) {
+      if(points.length) pauseRecording();
+      else { cameraRequested = false; refresh(); }
+    }
     if(mode==='playing') {
       mode='replay-paused';refresh();
       $('result-caption').textContent='화면을 벗어나 재생을 멈췄어요. 재생 버튼으로 이어보세요.';
+    }
+  });
+  window.addEventListener('pagehide',()=>{
+    pauseRecording();
+    stopCamera();
+    analysisController?.abort();
+  });
+  window.addEventListener('pageshow',event=>{
+    if(event.persisted && captureSource==='webcam' && view==='drawing') {
+      mode='idle';
+      setView('intro');
+      openStart();
     }
   });
   canvas.addEventListener('webglcontextlost',event=>{
