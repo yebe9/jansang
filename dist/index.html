@@ -6,12 +6,11 @@
   <meta name="theme-color" content="#111b20">
   <meta name="description" content="10초의 움직임이 하나의 잔상으로. 움직임을 그리고, 멈추고, 다시 바라보는 WebGL 실험.">
   <title>Ghosting — 움직임을 남기는 방법</title>
-  <link rel="stylesheet" href="./styles.css?v=20261020-ghosting-ai">
-  <script src="./config.js?v=20261020-public-ai" defer></script>
-  <script src="./pose-camera.js?v=20261020-ghosting-ai" defer></script>
-  <script src="./motion-analysis.js?v=20261020-ghosting-ai" defer></script>
-  <script src="./feeling-similarity.js?v=20261020-ghosting-ai" defer></script>
-  <script src="./app.js?v=20261020-public-ai" defer></script>
+  <link rel="stylesheet" href="./styles.css?v=20261020-ai-20s">
+  <script src="./config.js?v=20261020-ai-20s" defer></script>
+  <script src="./pose-camera.js?v=20261020-ai-20s" defer></script>
+  <script src="./motion-analysis.js?v=20261020-ai-20s" defer></script>
+  <script src="./app.js?v=20261020-ai-20s" defer></script>
 </head>
 <body data-view="intro">
   <header class="header">
@@ -68,7 +67,6 @@
         <p id="analysis-caveat"></p>
         <button class="demo-toggle" id="analyze-button">AI로 움직임 해석하기 <span aria-hidden="true">↗</span></button>
         <div class="comparison-insight" role="status"><strong id="comparison-verdict">내 의도를 먼저 남겨보세요.</strong><p id="comparison-explanation">움직임의 어느 부분이 그 느낌을 전했을까요?</p></div>
-        <section class="similarity" id="comparison-score" aria-label="표현 유사도" hidden><p>표현 유사도</p><strong id="similarity-score"></strong><p id="similarity-reason"></p><small>문구의 의미 특징을 비교한 참고값이며, 감정의 정확도가 아닙니다.</small></section>
         <p class="comparison-footnote">AI는 기록된 움직임의 좌표를 읽습니다. ‘초조한’ 등의 말은 움직임에서 받은 인상이며, 사람의 실제 감정이 아닙니다. 내 의도는 AI에게 보내지 않습니다.</p>
       </section>
       <div class="trace-stats"><span><b id="result-duration">10.0</b> 초의 움직임</span><span><b id="result-strokes">1</b> 개의 획</span></div>
@@ -87,7 +85,7 @@
     <div class="analysis-orbit" aria-hidden="true"></div>
     <p class="eyebrow">GHOSTING / AI READING</p>
     <h2 id="analysis-dialog-title">움직임을 읽고 있어요.</h2>
-    <p id="analysis-dialog-copy" role="status">최대 15초 동안 분석합니다.<br>응답이 지연되면 다시 시도할 수 있어요.</p>
+    <p id="analysis-dialog-copy" role="status">최대 20초 동안 분석합니다.<br>응답이 지연되면 다시 시도할 수 있어요.</p>
     <button id="analysis-cancel" class="text-button">해석 취소하고 잔상 보기</button>
   </dialog>
   <button id="reopen-result" class="reopen-result" hidden>의도와 해석 다시 보기 <span aria-hidden="true">↗</span></button>

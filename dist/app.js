@@ -40,6 +40,7 @@
   let jointTracks = new Map();
   let analysis = null;
   let analysisState = 'idle';
+  let analysisErrorCode = '';
   let motionReport = null;
   let analysisMessage = '';
   let analysisBusy = false;
@@ -250,13 +251,14 @@
     $('reading-label').textContent = '02 / AI READING';
     $('reading-title').textContent = 'AI가 느낀 움직임';
     $('ai-word').textContent = analysis?.impression || (analysisBusy ? '해석 중'
-      : analysisState === 'error' ? '해석을 받지 못했어요' : analysisState === 'insufficient' ? '움직임이 부족해요' : '해석 대기');
+      : analysisState === 'error' ? analysisErrorTitle(analysisErrorCode) : analysisState === 'insufficient' ? '움직임이 부족해요' : '해석 대기');
     $('analysis-qualities').replaceChildren(...(analysis?.qualities || []).slice(0,4).map(text => {
       const tag = document.createElement('span'); tag.textContent = text; return tag;
     }));
     $('ai-summary').textContent = analysis?.description || (analysisBusy
       ? 'AI가 움직임에서 전해지는 인상을 읽고 있습니다.' : '아직 AI가 생성한 결과가 없습니다.');
     $('analysis-status').textContent = analysisMessage;
+    $('analysis-status').dataset.code = analysisErrorCode;
     $('analysis-evidence').hidden = !analysis;
     $('analysis-observations').replaceChildren(...(analysis?.observations || []).map(text => {
       const li = document.createElement('li'); li.textContent = text; return li;
@@ -277,16 +279,27 @@
       $('comparison-verdict').textContent = '내 의도를 남겼어요.';
       $('comparison-explanation').textContent = 'AI 해석이 도착하면 내 표현과 나란히 비교할 수 있어요.';
     }
-    $('comparison-score').hidden = !ai || !intendedFeeling;
-    if (ai && intendedFeeling) {
-      const similarity = window.GhostingSimilarity?.compare(intendedFeeling, analysis.qualities || []);
-      $('similarity-score').textContent = Number.isFinite(similarity?.score)
-        ? `${Math.round(clamp(similarity.score, 0, 100))}%` : '비교할 표현을 찾지 못했어요';
-      $('similarity-reason').textContent = similarity?.reason || '이 표현의 의미를 비교할 자료가 아직 부족합니다.';
-    } else {
-      $('similarity-score').textContent = '';
-      $('similarity-reason').textContent = '';
-    }
+  }
+
+  function analysisErrorTitle(code) {
+    if (code === 'AI_TIMEOUT') return '분석 시간이 초과됐어요';
+    if (['RATE_LIMITED','PROVIDER_QUOTA'].includes(code)) return '분석 요청이 많아요';
+    if (code === 'CANCELLED') return 'AI 해석을 취소했어요';
+    if (code === 'NOT_CONFIGURED') return 'AI 연결이 필요해요';
+    if (code === 'PROVIDER_REGION') return 'AI 서버 지역을 확인해 주세요';
+    if (code === 'PROVIDER_KEY') return 'AI 연결 설정을 확인해 주세요';
+    if (['API_CONFIG','MODEL_CONFIG','MODEL_UNAVAILABLE','PROVIDER_CONFIG'].includes(code)) return 'AI 설정을 확인해 주세요';
+    if (['INVALID_ANALYSIS','INCOMPLETE_ANALYSIS'].includes(code)) return 'AI 응답을 다시 받아야 해요';
+    if (['INVALID_MOTION','INVALID_JSON','PAYLOAD_TOO_LARGE'].includes(code)) return '움직임을 다시 기록해 주세요';
+    if (code === 'ORIGIN_DENIED') return '허용된 주소에서 열어주세요';
+    if (code === 'SERVER_ERROR') return '분석 서버에 오류가 있어요';
+    return 'AI 연결을 확인해 주세요';
+  }
+
+  function analysisError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
   }
 
   function commitIntent() {
@@ -315,6 +328,7 @@
     analysis = null;
     motionReport = null;
     analysisState = 'idle';
+    analysisErrorCode = '';
     analysisMessage = '';
     $('analysis-evidence').open = false;
     if (analysisDialog.open) analysisDialog.close();
@@ -324,6 +338,7 @@
     motionReport = window.JansangMotion.analyze({source:captureSource, handTarget, points, poseFrames, durationMs:duration, captureAspect});
     analysis = null;
     analysisState = motionReport.sufficient ? 'idle' : 'insufficient';
+    analysisErrorCode = '';
     analysisMessage = motionReport.sufficient
       ? (isExample ? '합성 예시입니다. 해석 버튼을 누르면 이 예시의 좌표를 AI에 보냅니다.'
         : 'AI 해석을 요청하면 움직임에서 전해지는 인상을 볼 수 있어요.')
@@ -338,11 +353,13 @@
     if (['localhost','127.0.0.1','[::1]'].includes(location.hostname)) return '';
     const configured = (window.JANSANG_CONFIG?.apiBase || '').trim().replace(/\/+$/, '');
     if (configured) {
-      const url = new URL(configured);
-      if (url.protocol !== 'https:') throw new Error('AI 서버 주소는 HTTPS여야 합니다.');
+      let url;
+      try { url = new URL(configured); }
+      catch { throw analysisError('API_CONFIG', 'AI 서버 주소를 확인해 주세요. 올바른 HTTPS 주소가 필요합니다.'); }
+      if (url.protocol !== 'https:') throw analysisError('API_CONFIG', 'AI 서버 주소는 HTTPS여야 합니다.');
       return configured;
     }
-    throw new Error('AI 서버가 아직 연결되지 않았습니다. Gemini 키와 서버를 연결한 뒤 다시 시도해 주세요.');
+    throw analysisError('NOT_CONFIGURED', 'AI 서버가 아직 연결되지 않았습니다. Gemini 키와 서버를 연결한 뒤 다시 시도해 주세요.');
   }
 
   // Covers the entire request, including reading its body, even if a stalled
@@ -365,10 +382,11 @@
     const controller = new AbortController();
     analysisController = controller;
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 15000);
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
     analysisBusy = true;
     analysis = null;
     analysisState = 'busy';
+    analysisErrorCode = '';
     analysisMessage = '움직임 좌표를 바탕으로 인상을 읽고 있어요. 영상과 내 의도는 보내지 않습니다.';
     updateComparison();
     if (!analysisDialog.open) analysisDialog.showModal();
@@ -379,24 +397,35 @@
         body:JSON.stringify(motionReport.payload), signal:controller.signal, credentials:'omit'
       }), controller.signal);
       const data = await abortable(response.json().catch(() => null), controller.signal);
-      if (!response.ok) throw new Error(data?.error?.message || 'AI 서버에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.');
+      if (!response.ok) {
+        const fallbackCode = response.status === 429 ? 'RATE_LIMITED'
+          : response.status === 504 ? 'AI_TIMEOUT' : 'PROVIDER_UNAVAILABLE';
+        const fallbackMessage = response.status === 429 ? '분석 요청이 많습니다. 잠시 기다린 뒤 같은 잔상을 다시 해석해 주세요.'
+          : response.status === 504 ? 'AI가 제한 시간 안에 응답하지 않았어요. 같은 잔상을 다시 해석할 수 있습니다.'
+          : 'AI 서버에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.';
+        throw analysisError(typeof data?.error?.code === 'string' && data.error.code ? data.error.code : fallbackCode,
+          typeof data?.error?.message === 'string' && data.error.message ? data.error.message : fallbackMessage);
+      }
       const result = data?.analysis;
       if (!result || typeof result.impression !== 'string' || typeof result.description !== 'string' ||
           !Array.isArray(result.observations) || !result.observations.every(x=>typeof x==='string') ||
           !Array.isArray(result.qualities) || !result.qualities.length ||
           !result.qualities.every(x=>typeof x==='string' && x.trim()) ||
-          typeof result.caveat !== 'string') throw new Error('AI 응답 형식을 확인할 수 없습니다. 다시 시도해주세요.');
+          typeof result.caveat !== 'string') throw analysisError('INVALID_ANALYSIS', 'AI 응답 형식을 확인할 수 없습니다. 다시 시도해주세요.');
       if (id !== takeId || analysisController !== controller || controller.signal.aborted) return;
       analysis = result;
       analysisState = 'ready';
+      analysisErrorCode = '';
       analysisMessage = (isExample ? '합성 예시 움직임에 대한 ' : '') + 'Gemini가 움직임 정보만 보고 생성한 해석입니다.';
       announce('AI 해석이 도착했습니다. 내 의도와 비교해보세요.');
     } catch (error) {
       if (id !== takeId || analysisController !== controller) return;
       analysisState = 'error';
+      analysisErrorCode = error.name === 'AbortError' ? (timedOut ? 'AI_TIMEOUT' : 'CANCELLED')
+        : typeof error.code === 'string' ? error.code : 'NETWORK_ERROR';
       analysisMessage = error.name === 'AbortError'
-        ? (timedOut ? '15초 안에 AI 응답을 받지 못해 요청을 멈췄어요. 다시 시도할 수 있습니다.' : 'AI 해석을 취소했어요. 잔상은 그대로 남아 있습니다.')
-        : error instanceof TypeError ? 'AI 서버에 연결하지 못했습니다. 인터넷 연결과 서버 설정을 확인해주세요.' : error.message;
+        ? (timedOut ? '20초 안에 AI 응답을 받지 못해 요청을 멈췄어요. 잔상은 남아 있으니 다시 해석할 수 있습니다.' : 'AI 해석을 취소했어요. 잔상은 그대로 남아 있습니다.')
+        : analysisErrorCode === 'NETWORK_ERROR' ? 'AI 서버에 연결하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.' : error.message;
     } finally {
       clearTimeout(timeout);
       if (id === takeId && analysisController === controller) {

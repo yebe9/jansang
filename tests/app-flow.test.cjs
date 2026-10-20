@@ -8,7 +8,6 @@ const dist = path.join(__dirname, '..', 'dist');
 const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
 const appSource = fs.readFileSync(path.join(dist, 'app.js'), 'utf8');
 const motionSource = fs.readFileSync(path.join(dist, 'motion-analysis.js'), 'utf8');
-const similaritySource = fs.readFileSync(path.join(dist, 'feeling-similarity.js'), 'utf8');
 const copy = value => JSON.parse(JSON.stringify(value));
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
@@ -158,7 +157,6 @@ function createApp({ fetchResponse, cameraStart, automaticAI = false, hostname =
     },
   });
   vm.runInContext(motionSource, context, { filename: 'motion-analysis.js' });
-  vm.runInContext(similaritySource, context, { filename: 'feeling-similarity.js' });
   const analyze = window.JansangMotion.analyze;
   window.JansangMotion.analyze = input => {
     const report = analyze(input);
@@ -544,7 +542,8 @@ test('an AI error shows guidance without presenting local measurements as an int
   await app.click('finish');
   await flush();
   assert.equal(app.get('analysis-badge').textContent, '해석 불가');
-  assert.equal(app.get('ai-word').textContent, '해석을 받지 못했어요');
+  assert.equal(app.get('ai-word').textContent, '분석 요청이 많아요');
+  assert.equal(app.get('analysis-status').dataset.code, 'PROVIDER_QUOTA');
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.get('analysis-evidence').hidden, true);
   assert.match(app.get('analysis-status').textContent, /무료 사용량 한도/);
@@ -752,7 +751,6 @@ test('Ghosting defaults to disclosed automatic AI and removes every monochrome U
   assert.match(checkbox, /\bchecked\b/);
   assert.match(html, /<title>Ghosting/);
   assert.match(html, /<span>Ghosting<small>/);
-  assert.ok(html.indexOf('feeling-similarity.js') < html.indexOf('src="./app.js'));
   assert.doesNotMatch(html, /MOVEMENT READING|color-mono|result-color|mono-note|한 가지 색|단색/);
   assert.doesNotMatch(appSource, /motionReport\.local|analysisKind|colorMode|setColor|result-color|mono-note/);
   const app = createApp();
@@ -771,35 +769,36 @@ test('automatic AI opens the progress modal and closes immediately on an early s
   assert.equal(app.get('analysis-badge').textContent, 'AI 해석 중');
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.calls.length, 1);
-  assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [15000]);
+  assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [20000]);
   resolve(ok(aiResult));
   await flush();
-  assert.equal(app.get('analysis-dialog').open, false, 'No fixed fifteen-second wait after success');
+  assert.equal(app.get('analysis-dialog').open, false, 'No fixed twenty-second wait after success');
   assert.equal(app.get('ai-word').textContent, aiResult.analysis.impression);
   assert.equal(app.timers.size, 0);
 });
 
-test('fifteen-second deadline closes a stalled fetch and ignores its late response', async () => {
+test('twenty-second deadline closes a stalled fetch and ignores its late response', async () => {
   let resolve;
   const response = new Promise(done => { resolve = done; });
   const app = createApp({ automaticAI:true, fetchResponse:() => response });
   const camera = await app.startHand();
   recordHand(camera);
   await app.click('finish');
-  const timeout = [...app.timers.values()].find(timer => timer.delay === 15000);
+  const timeout = [...app.timers.values()].find(timer => timer.delay === 20000);
   assert.ok(timeout);
   timeout.callback();
   await flush();
   assert.equal(app.calls[0].options.signal.aborted, true);
   assert.equal(app.get('analysis-dialog').open, false);
   assert.equal(app.get('analysis-badge').textContent, '해석 불가');
-  assert.match(app.get('analysis-status').textContent, /15초/);
+  assert.match(app.get('analysis-status').textContent, /20초/);
+  assert.equal(app.get('analysis-status').dataset.code, 'AI_TIMEOUT');
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.get('analyze-button').disabled, false);
   assert.equal(app.timers.size, 0);
   resolve(ok(aiResult));
   await flush();
-  assert.equal(app.get('ai-word').textContent, '해석을 받지 못했어요');
+  assert.equal(app.get('ai-word').textContent, '분석 시간이 초과됐어요');
 });
 
 test('the same deadline covers a stalled response body rather than restarting after headers', async () => {
@@ -815,7 +814,7 @@ test('the same deadline covers a stalled response body rather than restarting af
   [...app.timers.values()][0].callback();
   await flush();
   assert.equal(app.get('analysis-dialog').open, false);
-  assert.match(app.get('analysis-status').textContent, /15초/);
+  assert.match(app.get('analysis-status').textContent, /20초/);
   resolveBody(aiResult);
   await flush();
   assert.equal(app.get('analysis-badge').textContent, '해석 불가');
@@ -834,6 +833,8 @@ test('progress dialog cancellation preserves the recording and prevents late AI 
   assert.equal(app.get('result-dialog').open, true);
   assert.equal(app.get('point-count').textContent, count);
   assert.match(app.get('analysis-status').textContent, /취소/);
+  assert.equal(app.get('analysis-status').dataset.code, 'CANCELLED');
+  assert.equal(app.get('ai-word').textContent, 'AI 해석을 취소했어요');
   assert.equal(app.calls[0].options.signal.aborted, true);
   resolve(ok(aiResult));
   await flush();
@@ -850,6 +851,8 @@ test('an unavailable public API remains a plain error without fake impressions o
   assert.equal(app.get('analysis-dialog').open, false);
   assert.equal(app.get('analysis-badge').textContent, '해석 불가');
   assert.match(app.get('analysis-status').textContent, /서버가 아직 연결되지/);
+  assert.equal(app.get('analysis-status').dataset.code, 'NOT_CONFIGURED');
+  assert.equal(app.get('ai-word').textContent, 'AI 연결이 필요해요');
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.get('analysis-evidence').hidden, true);
 });
@@ -950,41 +953,34 @@ test('Korean IME composition is not truncated until committed and its complete o
   assert.equal(app.get('intent-word').textContent, '가나다라마');
 });
 
-test('similarity runs only for a short private intent after a real AI result and uses the supplied lexicon', async () => {
+test('private intention and actual AI remain side by side with no expression score or similarity module', async () => {
   const result = copy(aiResult);
   result.analysis.qualities = ['유연한'];
   const app = createApp({ fetchResponse:async () => ok(result) });
-  const compared = [];
-  const compare = app.window.GhostingSimilarity.compare;
-  app.window.GhostingSimilarity = { compare(intent, qualities) {
-    compared.push({intent,qualities:copy(qualities)});
-    return compare(intent, qualities);
-  } };
   await app.click('example');
   app.get('intent-short').value = '유연한';
   app.get('intent-detail').value = '절대 보내지 않을 내 사적인 생각';
   await app.get('intent-short').dispatch('input');
-  assert.equal(compared.length, 0);
-  assert.equal(app.get('comparison-score').hidden, true);
+  assert.equal(app.get('intent-word').textContent, '유연한');
+  assert.equal(app.get('ai-word').textContent, '해석 대기');
   await app.click('analyze-button');
   await flush();
-  assert.ok(compared.length > 0);
-  assert.equal(compared.at(-1).intent, '유연한');
-  assert.deepEqual(compared.at(-1).qualities, result.analysis.qualities);
-  assert.equal(app.get('comparison-score').hidden, false);
-  assert.equal(app.get('similarity-score').textContent, '100%');
+  assert.equal(app.get('intent-word').textContent, '유연한');
+  assert.equal(app.get('ai-word').textContent, result.analysis.impression);
+  assert.deepEqual(app.get('analysis-qualities').children.map(tag => tag.textContent), result.analysis.qualities);
   assert.ok(!app.calls[0].options.body.includes('유연한'));
   assert.ok(!app.calls[0].options.body.includes('사적인'));
-  app.get('intent-short').value = '처음본표현';
-  await app.get('intent-short').dispatch('input');
-  assert.doesNotMatch(app.get('similarity-score').textContent, /\d|%/);
-  assert.match(app.get('similarity-score').textContent, /찾지 못/);
-  app.get('intent-short').value = '';
-  await app.get('intent-short').dispatch('input');
-  assert.equal(app.get('comparison-score').hidden, true, 'Long detail alone does not create a guessed score');
+  assert.equal(app.get('comparison-score'), undefined);
+  assert.equal(app.window.GhostingSimilarity, undefined);
+  assert.doesNotMatch(html, /similarity|표현 유사도|comparison-score/i);
+  assert.doesNotMatch(appSource, /Similarity|comparison-score|similarity-score/);
+  const styles = fs.readFileSync(path.join(dist, 'styles.css'), 'utf8');
+  assert.doesNotMatch(styles, /\.similarity/);
+  assert.equal(fs.existsSync(path.join(dist, 'feeling-similarity.js')), false);
+  assert.equal(fs.existsSync(path.join(__dirname, 'feeling-similarity.test.cjs')), false);
 });
 
-test('malformed AI qualities do not become an apparent AI interpretation or similarity score', async () => {
+test('malformed AI qualities produce a specific response-format failure without a fake interpretation', async () => {
   const malformed = copy(aiResult);
   malformed.analysis.qualities = [null];
   const app = createApp({ automaticAI:true, fetchResponse:async () => ok(malformed) });
@@ -994,6 +990,84 @@ test('malformed AI qualities do not become an apparent AI interpretation or simi
   await flush();
   assert.equal(app.get('analysis-badge').textContent, '해석 불가');
   assert.equal(app.get('analysis-qualities').children.length, 0);
-  assert.equal(app.get('comparison-score').hidden, true);
+  assert.equal(app.get('ai-word').textContent, 'AI 응답을 다시 받아야 해요');
+  assert.equal(app.get('analysis-status').dataset.code, 'INVALID_ANALYSIS');
   assert.match(app.get('analysis-status').textContent, /응답 형식/);
+});
+
+test('API failure codes keep distinct actionable titles and preserve the server guidance', async () => {
+  const cases = [
+    ['AI_TIMEOUT', 504, '분석 시간이 초과됐어요'],
+    ['PROVIDER_QUOTA', 429, '분석 요청이 많아요'],
+    ['RATE_LIMITED', 429, '분석 요청이 많아요'],
+    ['PROVIDER_UNAVAILABLE', 502, 'AI 연결을 확인해 주세요'],
+    ['PROVIDER_REGION', 503, 'AI 서버 지역을 확인해 주세요'],
+    ['PROVIDER_KEY', 503, 'AI 연결 설정을 확인해 주세요'],
+    ['MODEL_UNAVAILABLE', 503, 'AI 설정을 확인해 주세요'],
+    ['INVALID_ANALYSIS', 502, 'AI 응답을 다시 받아야 해요'],
+    ['INCOMPLETE_ANALYSIS', 502, 'AI 응답을 다시 받아야 해요'],
+    ['INVALID_MOTION', 400, '움직임을 다시 기록해 주세요'],
+  ];
+  for (const [code, status, title] of cases) {
+    const message = `서버에서 안내한 ${code}의 해결 방법`;
+    const app = createApp({ automaticAI:true, fetchResponse:async () => ({
+      ok:false, status, json:async () => ({error:{code,message}})
+    }) });
+    const camera = await app.startHand();
+    recordHand(camera);
+    await app.click('finish');
+    await flush();
+    assert.equal(app.get('ai-word').textContent, title, code);
+    assert.equal(app.get('analysis-status').textContent, message, 'Keep the precise server explanation');
+    assert.equal(app.get('analysis-status').dataset.code, code, 'Retain the API code rather than converting every error to timeout');
+    assert.equal(app.get('analysis-dialog').open, false);
+    assert.equal(app.get('analysis-qualities').children.length, 0);
+    assert.equal(app.calls.length, 1, 'An error must not trigger an invisible extra client request');
+  }
+});
+
+test('network failures and non-JSON HTTP errors still identify the cause without losing a trace', async () => {
+  for (const [fetchResponse, code, title] of [
+    [async () => { throw new TypeError('Failed to fetch'); }, 'NETWORK_ERROR', 'AI 연결을 확인해 주세요'],
+    [async () => ({ok:false,status:429,json:async () => { throw new SyntaxError('HTML'); }}), 'RATE_LIMITED', '분석 요청이 많아요'],
+    [async () => ({ok:false,status:504,json:async () => { throw new SyntaxError('HTML'); }}), 'AI_TIMEOUT', '분석 시간이 초과됐어요'],
+  ]) {
+    const app = createApp({automaticAI:true,fetchResponse});
+    const camera = await app.startHand();
+    recordHand(camera);
+    const count = app.get('point-count').textContent;
+    await app.click('finish');
+    await flush();
+    assert.equal(app.get('analysis-status').dataset.code, code);
+    assert.equal(app.get('ai-word').textContent, title);
+    assert.equal(app.get('point-count').textContent, count, 'Retry uses the already-recorded movement');
+    assert.equal(app.get('analyze-button').disabled, false);
+    assert.equal(app.get('analysis-dialog').open, false);
+  }
+});
+
+test('cancelling then retrying keeps a successful new response when the earlier request fails late', async () => {
+  let rejectOld;
+  let attempts = 0;
+  const app = createApp({automaticAI:true,fetchResponse:() => ++attempts === 1
+    ? new Promise((_resolve,reject) => { rejectOld = reject; }) : Promise.resolve(ok(aiResult))
+  });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  await app.click('analysis-cancel');
+  await flush();
+  assert.equal(app.get('analysis-status').dataset.code, 'CANCELLED');
+  await app.click('analyze-button');
+  await flush();
+  assert.equal(app.get('ai-word').textContent, aiResult.analysis.impression);
+  assert.equal(app.get('analysis-status').dataset.code, '', 'A successful retry clears previous error metadata');
+  rejectOld(new TypeError('Old transport failed later'));
+  await flush();
+  assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+  assert.equal(app.get('ai-word').textContent, aiResult.analysis.impression);
+  assert.equal(app.get('analysis-status').dataset.code, '');
+  assert.equal(app.get('analysis-dialog').open, false);
+  assert.equal(app.calls.length, 2);
+  assert.equal(app.timers.size, 0);
 });

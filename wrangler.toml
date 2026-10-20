@@ -3,6 +3,10 @@ main = "api/worker.mjs"
 compatibility_date = "2026-10-01"
 workers_dev = true
 
+# Use a Gemini-supported server region; visitor-nearest routing can be rejected.
+[placement]
+region = "aws:us-east-1"
+
 [vars]
 ALLOWED_ORIGIN = "https://yebe9.github.io"
 GEMINI_MODEL = "gemini-3.5-flash-lite"

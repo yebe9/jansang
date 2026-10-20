@@ -3,11 +3,15 @@
 import { DANCE_VOCABULARY } from './dance-vocabulary.mjs';
 export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 export const MAX_BODY_BYTES = 100 * 1024;
-export const ANALYSIS_DEADLINE_MS = 13000;
+export const ANALYSIS_DEADLINE_MS = 19000;
 const MAX_FRAMES = 80;
 const PROVIDER_FRAME_LIMIT = 24;
 const DANCE_LABELS = DANCE_VOCABULARY.map(item => item.label);
 const LABEL_SET = new Set(DANCE_LABELS);
+const LABEL_BY_SPACING = new Map(DANCE_LABELS.map(label => [label.replace(/\s/g, ''), label]));
+const RETRYABLE_STATUS = new Set([500, 502, 503, 504]);
+const RETRY_DELAY_MS = 250;
+const MIN_RETRY_BUDGET_MS = 2000;
 const HAND_SUMMARY_JOINTS = ['wrist', 'indexMcp', 'thumbTip', 'indexTip', 'middleTip', 'ringTip', 'pinkyTip'];
 const JOINTS = new Set([
   'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow',
@@ -60,10 +64,11 @@ stillnessRatio=느린 시간비율, coverage=각 점이 연속 구간에서 이�
 ${DANCE_VOCABULARY.map(item => item.label + ': ' + item.description).join('\n')}`;
 
 class ApiError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, diagnosticCode = code) {
     super(message);
     this.status = status;
     this.code = code;
+    this.diagnosticCode = diagnosticCode;
   }
 }
 
@@ -204,6 +209,7 @@ async function withDeadline(operation, requestedMs) {
   const timeoutMs = Number.isFinite(requestedMs)
     ? Math.min(ANALYSIS_DEADLINE_MS, Math.max(1, requestedMs)) : ANALYSIS_DEADLINE_MS;
   const controller = new AbortController();
+  const deadlineAt = Date.now() + timeoutMs;
   let timer;
   const expiry = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -213,7 +219,9 @@ async function withDeadline(operation, requestedMs) {
       controller.abort();
     }, timeoutMs);
   });
-  try { return await Promise.race([Promise.resolve().then(() => operation(controller.signal)), expiry]); }
+  try { return await Promise.race([
+    Promise.resolve().then(() => operation(controller.signal, () => Math.max(0, deadlineAt - Date.now()))), expiry
+  ]); }
   finally { clearTimeout(timer); }
 }
 
@@ -261,28 +269,76 @@ function cleanAnalysis(value) {
     if (typeof item !== 'string' || !item.trim() || item.length > max) throw new Error('Invalid analysis text');
     return item.trim();
   };
-  const impression = text(value.impression, 40);
-  if (!LABEL_SET.has(impression) || !Array.isArray(value.qualities) || value.qualities.length !== 3) {
-    throw new Error('Invalid vocabulary');
-  }
-  const qualities = value.qualities.map(item => text(item, 40));
-  if (new Set(qualities).size !== 3 || qualities.some(item => !LABEL_SET.has(item)) || !qualities.includes(impression)) {
-    throw new Error('Invalid vocabulary');
-  }
-  if (!Array.isArray(value.observations) || value.observations.length < 1 || value.observations.length > 2) {
-    throw new Error('Invalid observations');
-  }
+  const label = item => {
+    if (typeof item !== 'string' || item.length > 80) return null;
+    const plain = item.normalize('NFC').trim()
+      .replace(/^(?:\*\*|__)([\s\S]+?)(?:\*\*|__)$/, '$1')
+      .replace(/^["'“‘]|["'”’]$/g, '').trim();
+    return LABEL_SET.has(plain) ? plain : LABEL_BY_SPACING.get(plain.replace(/\s/g, '')) || null;
+  };
+  const impression = label(value.impression);
+  if (!impression) throw new Error('Invalid vocabulary');
+  const selected = Array.isArray(value.qualities) ? value.qualities
+    : typeof value.qualities === 'string' ? value.qualities.split(/[,·|;]/) : [];
+  // Keep only expressions the AI actually supplied. A duplicate/missing tag
+  // must never trigger a fabricated third choice or discard valid prose.
+  const qualities = [...new Set([impression, ...selected.map(label).filter(Boolean)])].slice(0, 3);
+  const evidence = typeof value.observations === 'string' ? [value.observations] : value.observations;
+  if (!Array.isArray(evidence) || !evidence.length || evidence.length > 10) throw new Error('Invalid observations');
+  const observations = evidence.filter(item => typeof item === 'string' && item.trim())
+    .map(item => text(item, 400)).slice(0, 2);
+  if (!observations.length) throw new Error('Invalid observations');
   return {
     impression,
-    description: text(value.description, 400),
-    observations: value.observations.map(item => text(item, 160)),
+    description: text(value.description, 1200),
+    observations,
     qualities,
     // A server-owned caveat remains visible even if the model omits its disclaimer.
     caveat: '움직임에서 느껴질 수 있는 시각적 인상을 설명한 것으로, 실제 감정이나 의도를 판정한 결과가 아닙니다.',
   };
 }
 
-async function analyze(motion, env, fetchImpl, signal) {
+function readAnalysis(text) {
+  if (typeof text !== 'string') throw new Error('Missing analysis');
+  const raw = text.trim();
+  // Strip a single formatting wrapper only. Never repair truncated JSON,
+  // extract an arbitrary substring, or invent missing response fields.
+  const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return cleanAnalysis(JSON.parse(fenced ? fenced[1] : raw));
+}
+
+function waitForRetry(signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(timedOut()); return; }
+    const aborted = () => { clearTimeout(timer); reject(timedOut()); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', aborted); resolve(); }, RETRY_DELAY_MS);
+    signal.addEventListener('abort', aborted, { once: true });
+  });
+}
+
+async function providerConfigError(response, signal) {
+  let error = {};
+  try { error = (await response.json())?.error || {}; } catch {}
+  assertActive(signal);
+  // Read provider wording only to choose a fixed public code. Never return or
+  // log the message, details, API key, request data, or response body.
+  const message = typeof error.message === 'string' ? error.message.slice(0, 4000) : '';
+  const reasons = Array.isArray(error.details) ? error.details.slice(0, 20).map(item => item?.reason) : [];
+  const region = /\b(?:location|region|country)\b.*(?:not supported|unsupported|not available|unavailable)|(?:not supported|unsupported|not available|unavailable).*\b(?:location|region|country)\b/i.test(message);
+  if (region) return new ApiError(503, 'PROVIDER_REGION',
+    'AI 서비스가 현재 분석 서버의 접속 지역을 지원하지 않습니다. 서버의 연결 지역 설정을 확인해야 합니다.',
+    `PROVIDER_REGION_HTTP_${response.status}`);
+  const key = response.status === 401 || reasons.some(reason =>
+    typeof reason === 'string' && /^API_KEY_(?:INVALID|EXPIRED|LEAKED|REVOKED|BLOCKED|NOT_FOUND|SERVICE_BLOCKED|IP_ADDRESS_BLOCKED|HTTP_REFERRER_BLOCKED|PROJECT_INVALID)$/.test(reason)
+  ) || /\bapi[_ -]?key\b.*(?:invalid|not valid|not found|expired|leaked|revoked|blocked)|(?:invalid|expired|leaked|revoked).*\bapi[_ -]?key\b/i.test(message);
+  if (key) return new ApiError(503, 'PROVIDER_KEY',
+    'AI 서버의 API 키가 유효하지 않거나 사용이 제한되었습니다. 서버의 키 설정을 확인해야 합니다.',
+    `PROVIDER_KEY_HTTP_${response.status}`);
+  return new ApiError(503, 'PROVIDER_CONFIG',
+    'AI 서버의 모델 사용 권한 또는 API 설정을 확인해 주세요.', `PROVIDER_HTTP_${response.status}`);
+}
+
+async function analyze(motion, env, fetchImpl, signal, remainingMs, onAttempt) {
   const model = env.GEMINI_MODEL || DEFAULT_MODEL;
   if (!/^gemini-[a-zA-Z0-9.-]+$/.test(model)) {
     throw new ApiError(503, 'MODEL_CONFIG', '서버의 AI 모델 설정을 확인해 주세요.');
@@ -291,14 +347,15 @@ async function analyze(motion, env, fetchImpl, signal) {
     assertActive(signal);
     const generationConfig = {
       temperature: 1,
-      maxOutputTokens: 600,
+      maxOutputTokens: 1200,
       responseMimeType: 'application/json',
       responseSchema: OUTPUT_SCHEMA,
     };
     if (model === 'gemini-2.5-flash') generationConfig.thinkingConfig = { thinkingBudget: 0 };
     if (model === DEFAULT_MODEL) generationConfig.thinkingConfig = { thinkingLevel: 'MINIMAL' };
     else if (model.startsWith('gemini-3.')) generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
-    const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const options = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
       body: JSON.stringify({
@@ -307,25 +364,53 @@ async function analyze(motion, env, fetchImpl, signal) {
         generationConfig,
       }),
       signal,
-    });
+    };
+    let response;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assertActive(signal);
+      onAttempt();
+      try { response = await fetchImpl(url, options); }
+      catch (error) {
+        assertActive(signal);
+        if (attempt === 0 && error instanceof TypeError && remainingMs() >= MIN_RETRY_BUDGET_MS) {
+          await waitForRetry(signal);
+          continue;
+        }
+        throw error;
+      }
+      assertActive(signal);
+      if (attempt === 0 && RETRYABLE_STATUS.has(response.status) && remainingMs() >= MIN_RETRY_BUDGET_MS) {
+        // Release the failed response without waiting on an error-body stream.
+        Promise.resolve(response.body?.cancel()).catch(() => {});
+        await waitForRetry(signal);
+        continue;
+      }
+      break;
+    }
     assertActive(signal);
     if (response.status === 429) throw new ApiError(429, 'PROVIDER_QUOTA', 'Gemini 무료 사용량 또는 요청 한도에 도달했습니다. 잠시 후 다시 시도해 주세요.');
     if (response.status === 404) {
       throw new ApiError(503, 'MODEL_UNAVAILABLE', '현재 AI 모델을 이 계정에서 사용할 수 없습니다. 서버의 모델 설정을 확인해 주세요.');
     }
     if ([400, 401, 403].includes(response.status)) {
-      throw new ApiError(503, 'PROVIDER_CONFIG', 'AI 서버의 API 키, 모델 사용 권한 또는 지원 지역을 확인해 주세요.');
+      throw await providerConfigError(response, signal);
     }
-    if (!response.ok) throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'AI 서비스가 잠시 응답하지 않습니다. 나중에 다시 시도해 주세요.');
+    if (!response.ok) throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'AI 서비스가 잠시 응답하지 않습니다. 나중에 다시 시도해 주세요.',
+      `PROVIDER_HTTP_${response.status}`);
     const payload = await response.json();
     assertActive(signal);
     const candidate = payload.candidates?.[0];
-    if (!candidate || candidate.finishReason !== 'STOP') {
+    if (!candidate || !['STOP', 'MAX_TOKENS'].includes(candidate.finishReason)) {
       throw new ApiError(502, 'INCOMPLETE_ANALYSIS', 'AI가 분석을 완성하지 못했습니다. 다시 시도해 주세요.');
     }
     const responseText = candidate.content?.parts?.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('');
-    try { return { provider: 'Gemini', model, analysis: cleanAnalysis(JSON.parse(responseText)) }; }
-    catch { throw new ApiError(502, 'INVALID_ANALYSIS', 'AI 응답 형식이 올바르지 않습니다. 다시 시도해 주세요.'); }
+    try { return { provider: 'Gemini', model, analysis: readAnalysis(responseText) }; }
+    catch {
+      if (candidate.finishReason === 'MAX_TOKENS') {
+        throw new ApiError(502, 'INCOMPLETE_ANALYSIS', 'AI 응답이 중간에 끝났습니다. 다시 시도해 주세요.');
+      }
+      throw new ApiError(502, 'INVALID_ANALYSIS', 'AI 응답 형식이 올바르지 않습니다. 다시 시도해 주세요.');
+    }
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (signal.aborted) throw timedOut();
@@ -347,7 +432,11 @@ export function createLocalLimiter({ limit = 12, periodMs = 60000 } = {}) {
 export async function handleApi(request, {
   env = {}, fetchImpl = fetch, checkLimit = async () => true,
   allowLocal = false, requireOrigin = false, timeoutMs = ANALYSIS_DEADLINE_MS,
+  onDiagnostic,
 } = {}) {
+  const startedAt = Date.now();
+  let attempts = 0;
+  let diagnosticCode = 'OK';
   const url = new URL(request.url);
   const origin = request.headers.get('origin');
   const allowedOrigins = (env.ALLOWED_ORIGIN || 'https://yebe9.github.io').split(',').map(value => value.trim()).filter(Boolean);
@@ -380,21 +469,30 @@ export async function handleApi(request, {
     if (!env.GEMINI_API_KEY?.trim()) {
       throw new ApiError(503, 'NOT_CONFIGURED', 'AI 서버에 Gemini API 키가 아직 연결되지 않았습니다. 움직임 기록과 재생은 계속 사용할 수 있습니다.');
     }
-    const result = await withDeadline(async signal => {
+    const result = await withDeadline(async (signal, remainingMs) => {
       const motion = validateMotion(await readBoundedJson(request, signal));
       assertActive(signal);
       const permitted = await checkLimit(request);
       assertActive(signal);
       if (!permitted) throw new ApiError(429, 'RATE_LIMITED', '분석 요청이 많습니다. 1분 뒤에 다시 시도해 주세요.');
-      return analyze(motion, env, fetchImpl, signal);
+      return analyze(motion, env, fetchImpl, signal, remainingMs, () => { attempts++; });
     }, timeoutMs);
     return json(200, result);
   } catch (error) {
     const known = error instanceof ApiError;
     const status = known ? error.status : 500;
+    diagnosticCode = known ? error.diagnosticCode : 'SERVER_ERROR';
     return json(status, { error: {
       code: known ? error.code : 'SERVER_ERROR',
       message: known ? error.message : '분석 서버에서 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.',
     } }, status === 429 ? { 'Retry-After': '60' } : {});
+  } finally {
+    if (url.pathname === '/api/analyze' && request.method === 'POST' && typeof onDiagnostic === 'function') {
+      try {
+        Promise.resolve(onDiagnostic({
+          code: diagnosticCode, elapsedMs: Math.max(0, Date.now() - startedAt), attempts
+        })).catch(() => {});
+      } catch {}
+    }
   }
 }

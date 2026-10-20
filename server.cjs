@@ -43,7 +43,7 @@ const server = http.createServer(async (req, res) => {
     res.end(req.method === 'HEAD' ? undefined : data);
   });
 });
-server.requestTimeout = 15000;
+server.requestTimeout = 20000;
 server.headersTimeout = 10000;
 server.listen(4173, '127.0.0.1', () => {
   console.log('Local: http://127.0.0.1:4173');

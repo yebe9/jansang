@@ -359,7 +359,7 @@ test('successful analysis uses an env key and constrained JSON prompt, retaining
     assert.equal(body.generationConfig.responseMimeType, 'application/json');
     assert.match(url, /models\/gemini-3\.5-flash-lite:generateContent$/);
     assert.deepEqual(body.generationConfig.thinkingConfig, { thinkingLevel: 'MINIMAL' });
-    assert.equal(body.generationConfig.maxOutputTokens, 600);
+    assert.equal(body.generationConfig.maxOutputTokens, 1200);
     assert.match(body.systemInstruction.parts[0].text, /실제 감정/);
     return goodResponse();
   } });
@@ -372,7 +372,7 @@ test('successful analysis uses an env key and constrained JSON prompt, retaining
   assert.ok(!JSON.stringify(result).includes(env.GEMINI_API_KEY));
 });
 
-test('output schema uses exactly the supplied vocabulary and rejects invented or duplicate labels', async () => {
+test('output schema keeps the supplied vocabulary and rejects missing prose or an invented main label', async () => {
   const { handleApi } = await handler;
   const { DANCE_VOCABULARY } = await import('../api/dance-vocabulary.mjs');
   const labels = DANCE_VOCABULARY.map(item => item.label);
@@ -394,11 +394,10 @@ test('output schema uses exactly the supplied vocabulary and rejects invented or
   assert.equal(response.status, 200);
   for (const patch of [
     { impression: '빠른' },
-    { qualities: ['유려한', '빠른', '우아한'] },
-    { qualities: ['유려한', '유려한', '우아한'] },
-    { qualities: ['유려한'] },
-    { qualities: ['매끄러운', '우아한', '미니멀한'] },
-    { observations: ['하나', '둘', '셋'] },
+    { impression: '' },
+    { description: '' },
+    { observations: [] },
+    { observations: ' ' },
   ]) {
     let calls = 0;
     const invalid = await handleApi(request(), { env, fetchImpl: async () => {
@@ -529,16 +528,16 @@ test('the same deadline covers a stalled incoming body and rate limiter before a
   assert.equal(providerCalls, 0, 'A late limiter must not dispatch an AI request after timeout');
 });
 
-test('the timeout cannot be configured past the 13-second server budget', async t => {
+test('the timeout cannot be configured past the 19-second server budget', async t => {
   const { handleApi, ANALYSIS_DEADLINE_MS } = await handler;
-  assert.equal(ANALYSIS_DEADLINE_MS, 13000);
+  assert.equal(ANALYSIS_DEADLINE_MS, 19000);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let settled = false;
   const pending = handleApi(request(), {
     env, timeoutMs: 90000, fetchImpl: () => new Promise(() => {})
   }).then(result => { settled = true; return result; });
   await new Promise(resolve => setImmediate(resolve));
-  t.mock.timers.tick(12999);
+  t.mock.timers.tick(18999);
   await Promise.resolve();
   assert.equal(settled, false);
   t.mock.timers.tick(1);
@@ -563,6 +562,161 @@ test('provider quota, rejected key, outage, malformed output and timeout are act
     assert.equal(response.status, status);
     assert.equal((await response.json()).error.code, code);
   }
+});
+
+test('provider region, key and permission failures are classified without exposing provider wording', async () => {
+  const { handleApi } = await handler;
+  for (const [status, error, code] of [
+    [400, { message: 'User location is not supported for the API use.' }, 'PROVIDER_REGION'],
+    [403, { message: 'This service is not available in your country.' }, 'PROVIDER_REGION'],
+    [400, { message: 'API key not valid. Please pass a valid API key.' }, 'PROVIDER_KEY'],
+    [403, { message: 'Your API key was reported as leaked.' }, 'PROVIDER_KEY'],
+    [400, { message: 'Credential problem', details: [{ reason: 'API_KEY_EXPIRED' }] }, 'PROVIDER_KEY'],
+    [401, { message: 'Unauthenticated' }, 'PROVIDER_KEY'],
+    [403, { message: 'The model is not enabled in this project.' }, 'PROVIDER_CONFIG'],
+    [400, { message: 'Invalid request field' }, 'PROVIDER_CONFIG'],
+  ]) {
+    let calls = 0;
+    const diagnostics = [];
+    const response = await handleApi(request(), {
+      env, onDiagnostic: item => diagnostics.push(item),
+      fetchImpl: async () => { calls++; return new Response(JSON.stringify({ error }), { status }); }
+    });
+    assert.equal(response.status, 503);
+    const result = await response.json();
+    assert.equal(result.error.code, code);
+    assert.equal(calls, 1, 'Configuration errors must not be retried');
+    assert.ok(!JSON.stringify(result).includes(error.message));
+    assert.equal(diagnostics.length, 1);
+    assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['attempts', 'code', 'elapsedMs']);
+    assert.equal(diagnostics[0].attempts, 1);
+    assert.ok(diagnostics[0].code.endsWith('HTTP_' + status));
+    assert.ok(!JSON.stringify(diagnostics).includes(error.message));
+    assert.ok(!JSON.stringify(diagnostics).includes(env.GEMINI_API_KEY));
+  }
+});
+
+test('format-only variations preserve actual AI prose and never invent additional vocabulary', async () => {
+  const { handleApi } = await handler;
+  const cases = [
+    [{ ...validAnalysis, impression: '  **절도있는**  ', qualities: [' 절도 있는 ', '날카로운', '날카로운', '빠른'] },
+      ['절도 있는', '날카로운']],
+    [{ ...validAnalysis, qualities: ['유려한', '유려한'] }, ['유려한']],
+    [{ ...validAnalysis, qualities: undefined }, ['유려한']],
+    [{ ...validAnalysis, qualities: '유려한 · 매끄러운 · 우아한' }, ['유려한', '매끄러운', '우아한']],
+    [{ ...validAnalysis, qualities: ['매끄러운', '우아한', '미니멀한'], observations: '한 줄의 실제 AI 관측입니다.' },
+      ['유려한', '매끄러운', '우아한']],
+    [{ ...validAnalysis, observations: ['관측 하나', '관측 둘', '관측 셋'] }, validAnalysis.qualities]
+  ];
+  for (const [analysis, expected] of cases) {
+    let calls = 0;
+    const result = await handleApi(request(), { env, fetchImpl: async () => {
+      calls++;
+      return new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: {
+        parts: [{ text: '```json\n' + JSON.stringify(analysis) + '\n```' }]
+      } }] }));
+    } });
+    assert.equal(result.status, 200);
+    const output = (await result.json()).analysis;
+    assert.deepEqual(output.qualities, expected);
+    assert.equal(output.description, analysis.description);
+    assert.ok(output.observations.length >= 1 && output.observations.length <= 2);
+    assert.equal(calls, 1);
+  }
+});
+
+test('complete capped output is usable but truncation and safety-blocked output are never repaired or retried', async () => {
+  const { handleApi } = await handler;
+  for (const [finishReason, text, expectedStatus] of [
+    ['MAX_TOKENS', JSON.stringify(validAnalysis), 200],
+    ['MAX_TOKENS', JSON.stringify(validAnalysis).slice(0, -5), 502],
+    ['SAFETY', JSON.stringify(validAnalysis), 502],
+    ['BLOCKLIST', JSON.stringify(validAnalysis), 502],
+    ['STOP', 'Here is your analysis: ' + JSON.stringify(validAnalysis), 502],
+  ]) {
+    let calls = 0;
+    const response = await handleApi(request(), { env, fetchImpl: async () => {
+      calls++;
+      return new Response(JSON.stringify({ candidates: [{ finishReason, content: { parts: [{ text }] } }] }));
+    } });
+    assert.equal(response.status, expectedStatus);
+    assert.equal(calls, 1);
+    if (expectedStatus !== 200) assert.equal((await response.json()).analysis, undefined);
+  }
+});
+
+test('transient 5xx and transport TypeError get at most one retry with one sanitized diagnostic', async () => {
+  const { handleApi } = await handler;
+  for (const first of [500, 502, 503, 504, 'network']) {
+    let calls = 0;
+    const diagnostics = [];
+    const response = await handleApi(request(), {
+      env, onDiagnostic: event => diagnostics.push(event),
+      fetchImpl: async () => {
+        calls++;
+        if (calls === 1) {
+          if (first === 'network') throw new TypeError('Sensitive transport details must stay private');
+          return new Response('{}', { status: first });
+        }
+        return goodResponse();
+      }
+    });
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].code, 'OK');
+    assert.equal(diagnostics[0].attempts, 2);
+    assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['attempts', 'code', 'elapsedMs']);
+  }
+  let calls = 0;
+  const response = await handleApi(request(), { env, fetchImpl: async () => {
+    calls++;
+    return new Response('{}', { status: 503 });
+  } });
+  assert.equal(response.status, 502);
+  assert.equal(calls, 2, 'A persistent outage must not create a retry loop');
+});
+
+test('quota, non-transient errors and insufficient remaining time never spend another provider call', async () => {
+  const { handleApi } = await handler;
+  for (const [status, timeoutMs] of [[429, 19000], [401, 19000], [403, 19000], [404, 19000], [501, 19000], [503, 1000]]) {
+    let calls = 0;
+    const response = await handleApi(request(), { env, timeoutMs, fetchImpl: async () => {
+      calls++;
+      return new Response('{}', { status });
+    } });
+    assert.ok(response.status >= 400);
+    assert.equal(calls, 1, status + ' must not be retried');
+  }
+});
+
+test('a retry shares the original deadline and the diagnostic cannot break request handling', async t => {
+  const { handleApi } = await handler;
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  let calls = 0;
+  let settled = false;
+  const pending = handleApi(request(), {
+    env, timeoutMs: 2100,
+    onDiagnostic: () => { throw new Error('Logging is optional'); },
+    fetchImpl: async () => {
+      calls++;
+      if (calls === 1) return new Response('{}', { status: 503 });
+      return new Promise(() => {});
+    }
+  }).then(response => { settled = true; return response; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+  t.mock.timers.tick(250);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2);
+  t.mock.timers.tick(1849);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  const response = await pending;
+  assert.equal(response.status, 504);
+  assert.equal((await response.json()).error.code, 'AI_TIMEOUT');
+  assert.equal(calls, 2);
 });
 
 test('rate limit prevents upstream calls, with retry guidance', async () => {

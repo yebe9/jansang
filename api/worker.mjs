@@ -5,6 +5,10 @@ export default {
     return handleApi(request, {
       env,
       requireOrigin: true,
+      // Operational metadata only; never log movement, AI text, or credentials.
+      onDiagnostic: ({ code, elapsedMs, attempts }) => {
+        console.info(JSON.stringify({ event: 'analysis', code, elapsedMs, attempts }));
+      },
       checkLimit: async req => {
         // These Cloudflare counters are shared within a location, not a global billing cap.
         // The default Gemini project should stay on the free tier.
