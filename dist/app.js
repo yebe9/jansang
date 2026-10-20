@@ -302,7 +302,12 @@
     const id = takeId;
     const controller = new AbortController();
     analysisController = controller;
-    const timeout = setTimeout(() => controller.abort(), 50000);
+    const timeout = setTimeout(() => controller.abort(), 95000);
+    const waitingNotice = setTimeout(() => {
+      if (id !== takeId || !analysisBusy) return;
+      analysisMessage = 'Gemini가 움직임을 해석하고 있어요. 최대 90초 정도 걸릴 수 있습니다. 기다리는 동안 기본 분석과 잔상을 살펴보세요.';
+      updateComparison();
+    }, 12000);
     analysisBusy = true;
     analysisMessage = '움직임 좌표를 바탕으로 인상을 읽고 있어요. 영상과 내 의도는 보내지 않습니다.';
     updateComparison();
@@ -331,6 +336,7 @@
         (analysisKind === 'ai' ? ' 앞서 받은 해석을 유지합니다.' : ' 아래 결과는 기본 수치 분석입니다.');
     } finally {
       clearTimeout(timeout);
+      clearTimeout(waitingNotice);
       if (id === takeId) {
         analysisBusy = false;
         analysisController = null;

@@ -5,7 +5,7 @@ workers_dev = true
 
 [vars]
 ALLOWED_ORIGIN = "https://yebe9.github.io"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
 
 # Store the key with `npx wrangler secret put GEMINI_API_KEY`, never in this file.
 # Namespace IDs only need to be unique within your Cloudflare account.

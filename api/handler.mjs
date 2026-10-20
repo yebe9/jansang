@@ -1,6 +1,6 @@
 // Shared by the local Node server and the optional Cloudflare Worker.
 // Only numeric movement data crosses this boundary. No video or intention text.
-export const DEFAULT_MODEL = 'gemini-2.5-flash';
+export const DEFAULT_MODEL = 'gemini-3.8-flash';
 export const MAX_BODY_BYTES = 100 * 1024;
 const MAX_FRAMES = 80;
 const JOINTS = new Set([
@@ -152,11 +152,15 @@ async function analyze(motion, env, fetchImpl, timeoutMs) {
   try {
     const generationConfig = {
       temperature: 0.5,
-      maxOutputTokens: 1400,
+      maxOutputTokens: 2400,
       responseMimeType: 'application/json',
       responseSchema: OUTPUT_SCHEMA,
     };
     if (model === 'gemini-2.5-flash') generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    if (model === 'gemini-3.8-flash') {
+      generationConfig.temperature = 1;
+      generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
+    }
     const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
@@ -168,7 +172,10 @@ async function analyze(motion, env, fetchImpl, timeoutMs) {
       signal: controller.signal,
     });
     if (response.status === 429) throw new ApiError(429, 'PROVIDER_QUOTA', 'Gemini 무료 사용량 또는 요청 한도에 도달했습니다. 잠시 후 다시 시도해 주세요.');
-    if ([400, 401, 403, 404].includes(response.status)) {
+    if (response.status === 404) {
+      throw new ApiError(503, 'MODEL_UNAVAILABLE', '현재 AI 모델을 이 계정에서 사용할 수 없습니다. 서버의 모델 설정을 확인해 주세요.');
+    }
+    if ([400, 401, 403].includes(response.status)) {
       throw new ApiError(503, 'PROVIDER_CONFIG', 'AI 서버의 API 키, 모델 사용 권한 또는 지원 지역을 확인해 주세요.');
     }
     if (!response.ok) throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'AI 서비스가 잠시 응답하지 않습니다. 나중에 다시 시도해 주세요.');
@@ -202,7 +209,7 @@ export function createLocalLimiter({ limit = 12, periodMs = 60000 } = {}) {
 
 export async function handleApi(request, {
   env = {}, fetchImpl = fetch, checkLimit = async () => true,
-  allowLocal = false, requireOrigin = false, timeoutMs = 30000,
+  allowLocal = false, requireOrigin = false, timeoutMs = 90000,
 } = {}) {
   const url = new URL(request.url);
   const origin = request.headers.get('origin');

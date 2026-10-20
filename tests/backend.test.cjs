@@ -29,7 +29,7 @@ const goodResponse = () => new Response(JSON.stringify({
 test('status exposes capability without exposing the server key', async () => {
   const { handleApi } = await handler;
   const response = await handleApi(new Request('https://worker.test/api/status', { headers: { Origin: origin } }), { env });
-  assert.deepEqual(await response.json(), { available: true, provider: 'Gemini', model: 'gemini-2.5-flash' });
+  assert.deepEqual(await response.json(), { available: true, provider: 'Gemini', model: 'gemini-3.8-flash' });
   const local = await handleApi(new Request('http://127.0.0.1:4173/api/status'), { env, allowLocal: true });
   assert.equal(local.status, 200);
 });
@@ -117,6 +117,8 @@ test('successful analysis uses an env key and constrained JSON prompt, retaining
     const body = JSON.parse(init.body);
     assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), motion());
     assert.equal(body.generationConfig.responseMimeType, 'application/json');
+    assert.match(url, /models\/gemini-3\.8-flash:generateContent$/);
+    assert.deepEqual(body.generationConfig.thinkingConfig, { thinkingLevel: 'LOW' });
     assert.match(body.systemInstruction.parts[0].text, /실제 감정/);
     return goodResponse();
   } });
@@ -134,6 +136,7 @@ test('provider quota, rejected key, outage, malformed output and timeout are act
   const cases = [
     [async () => new Response('{}', { status: 429 }), 429, 'PROVIDER_QUOTA'],
     [async () => new Response('{}', { status: 403 }), 503, 'PROVIDER_CONFIG'],
+    [async () => new Response('{}', { status: 404 }), 503, 'MODEL_UNAVAILABLE'],
     [async () => new Response('{}', { status: 500 }), 502, 'PROVIDER_UNAVAILABLE'],
     [async () => new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }] })), 502, 'INVALID_ANALYSIS'],
     [async () => new Response(JSON.stringify({ candidates: [{ finishReason: 'MAX_TOKENS' }] })), 502, 'INCOMPLETE_ANALYSIS'],
