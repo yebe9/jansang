@@ -16,7 +16,8 @@
     <span class="header-note">A STUDY IN MOVEMENT</span>
   </header>
 
-  <main class="workspace">
+  <div id="workspace-anchor" hidden></div>
+  <main class="workspace" id="workspace">
     <section class="stage-column" aria-label="움직임 무대">
       <div class="result-heading" id="result-heading" hidden><p class="eyebrow">THE TRACE YOU LEFT</p><h2>움직임이 지나간 자리<span>.</span></h2></div>
       <div class="stage" id="stage">
@@ -67,6 +68,14 @@
       <p class="privacy-note">기록은 이 화면에만 남고, 새로고침하면 사라집니다.</p>
     </aside>
   </main>
+
+  <dialog id="result-dialog" class="result-dialog" aria-labelledby="result-title">
+    <div class="result-dialog-toolbar">
+      <div><span aria-hidden="true">✳</span><p>당신의 잔상<small>A MOMENT TO FEEL</small></p></div>
+      <button id="result-close" class="result-close" aria-label="결과 팝업 닫고 잔상 크게 보기"><span>잔상 크게 보기</span><b aria-hidden="true">×</b></button>
+    </div>
+  </dialog>
+  <button id="reopen-result" class="reopen-result" hidden>의도와 해석 다시 보기 <span aria-hidden="true">↗</span></button>
 
   <div class="intro-action" id="intro-action"><button class="primary" id="open-start">시작하기 <span aria-hidden="true">↗</span></button></div>
   <div class="record-dock" id="record-dock" hidden>

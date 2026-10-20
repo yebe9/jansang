@@ -5,6 +5,8 @@
   const canvas = $('canvas');
   const stage = $('stage');
   const dialog = $('start-dialog');
+  const resultDialog = $('result-dialog');
+  const workspace = $('workspace');
   const LIMIT = 10000;
   let points = []; // { x, y, t, speed, stroke }
   let view = 'intro';
@@ -183,10 +185,13 @@
   }
 
   function setView(next) {
+    if(next !== 'result' && resultDialog.open) closeResult(false);
     view = next;
     document.body.dataset.view = next;
     const result = next === 'result';
-    for (const id of ['result-heading','transport','result-caption','result-panel']) $(id).hidden = !result;
+    for (const id of ['result-heading','transport','result-caption']) $(id).hidden = !result;
+    $('result-panel').hidden = !result || !resultDialog.open;
+    $('reopen-result').hidden = !result || resultDialog.open;
     $('record-dock').hidden = next !== 'drawing';
     $('drawing-hint').hidden = next !== 'drawing';
     $('tool-rail').hidden = next !== 'drawing';
@@ -351,9 +356,34 @@
     $('result-duration').textContent=(duration/1000).toFixed(1);
     $('result-strokes').textContent=new Set(points.map(p=>p.stroke)).size;
     $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.' : '재생 버튼을 눌러, 당신이 남긴 리듬을 다시 만나보세요.';
+    openResult();
+    $('result-panel').scrollTop = 0;
+    workspace.scrollTop = 0;
     refresh();render();
     $('result-title').focus({preventScroll:true});
     window.scrollTo(0,0);
+  }
+
+  // 같은 WebGL 캔버스를 팝업 안팎으로 옮겨 기록과 재생 상태를 보존한다.
+  function openResult() {
+    if(view !== 'result') return;
+    resultDialog.append(workspace);
+    $('result-panel').hidden = false;
+    $('reopen-result').hidden = true;
+    if(!resultDialog.open) resultDialog.showModal();
+    resize();
+    $('result-title').focus({preventScroll:true});
+  }
+
+  function closeResult(restoreFocus=true) {
+    if(!resultDialog.open) return;
+    if(mode === 'playing') togglePlayback();
+    resultDialog.close();
+    $('workspace-anchor').after(workspace);
+    $('result-panel').hidden = true;
+    $('reopen-result').hidden = view !== 'result';
+    resize();
+    if(restoreFocus) $('reopen-result').focus({preventScroll:true});
   }
 
   function finishRecording() {
@@ -442,6 +472,9 @@
 
   $('open-start').addEventListener('click',openStart);
   $('restart').addEventListener('click',openStart);
+  $('result-close').addEventListener('click',()=>closeResult());
+  $('reopen-result').addEventListener('click',openResult);
+  resultDialog.addEventListener('cancel',event=>{ event.preventDefault();closeResult(); });
   $('dialog-close').addEventListener('click',()=>dialog.close());
   $('start').addEventListener('click',startDrawing);
   $('example').addEventListener('click',loadExample);
