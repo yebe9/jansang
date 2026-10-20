@@ -39,10 +39,28 @@
 
     <aside class="result-panel" id="result-panel" aria-labelledby="result-title" hidden>
       <p class="eyebrow">03 / A MOMENT TO FEEL</p>
-      <h1 id="result-title" tabindex="-1">어떤 움직임이 <br>느껴지나요?</h1>
-      <p class="result-copy">선을 따라, 속도를 따라.<br>지금 눈앞의 움직임에 이름을 붙여보세요.</p>
-      <div class="feelings" role="group" aria-label="움직임에 대한 인상"><button aria-pressed="false"><span>≈</span> 유연한</button><button aria-pressed="false"><span>✳</span> 경쾌한</button><button aria-pressed="false"><span>↗</span> 날카로운</button><button aria-pressed="false"><span>∿</span> 망설이는</button></div>
-      <p id="feeling-note" aria-live="polite">정답은 없어요. 느껴지는 대로 골라보세요.</p>
+      <h1 id="result-title" tabindex="-1">내가 담은 느낌, <br>다르게 읽힐까요?</h1>
+      <p class="result-copy">이 움직임에 어떤 느낌을 담으려 했나요?<br>내 의도를 남기고, 비교 화면을 미리 살펴보세요.</p>
+      <h2 class="intent-heading">내가 의도한 느낌</h2>
+      <div class="feelings" role="group" aria-label="내가 의도한 느낌"><button aria-pressed="false" data-feeling="유연한"><span>≈</span> 유연한</button><button aria-pressed="false" data-feeling="경쾌한"><span>✳</span> 경쾌한</button><button aria-pressed="false" data-feeling="날카로운"><span>↗</span> 날카로운</button><button aria-pressed="false" data-feeling="망설이는"><span>∿</span> 망설이는</button></div>
+      <label class="intent-detail-label" for="intent-detail">나만의 말로 덧붙이기 <span>선택</span></label>
+      <input type="text" id="intent-detail" maxlength="80" autocomplete="off" placeholder="예: 망설이다가 용기를 내는 느낌" aria-describedby="feeling-note">
+      <p id="feeling-note" aria-live="polite">단어를 고르거나 직접 적어주세요. 이 화면에만 남습니다.</p>
+
+      <section class="interpretation" aria-labelledby="comparison-title">
+        <div class="comparison-heading"><h2 id="comparison-title">의도와 해석 사이</h2><span class="preview-badge">AI 미연결</span></div>
+        <div class="comparison-cards">
+          <article class="comparison-card"><p class="card-label">01 / MY INTENTION</p><h3>나의 의도</h3><strong id="intent-word">선택 전</strong><p id="intent-summary">표현하려던 느낌을 위에서 남겨주세요.</p></article>
+          <article class="comparison-card ai-card"><p class="card-label">02 / AI READING</p><h3>AI의 해석 <span id="ai-example-badge" hidden>예시</span></h3><strong id="ai-word">연결 대기</strong><p id="ai-summary">API 연결 후 실제 해석이 표시될 자리입니다.</p></article>
+        </div>
+        <button class="demo-toggle" id="comparison-toggle" aria-expanded="false" aria-controls="comparison-demo">AI 해석 예시 보기</button>
+        <div id="comparison-demo" class="comparison-demo" hidden>
+          <p class="demo-disclosure">화면 구성 예시입니다. 현재 궤적을 분석한 결과가 아닙니다.</p>
+          <div class="reading-example"><span>해석 근거 문장 예시</span><p>“방향을 바꾸는 선과 잠깐의 멈춤에서, 조심스럽게 나아가는 느낌이 읽힙니다.”</p></div>
+          <div class="comparison-insight" role="status"><strong id="comparison-verdict">내 의도를 먼저 남겨보세요.</strong><p id="comparison-explanation">선택한 표현과 고정된 예시를 나란히 비교합니다.</p></div>
+        </div>
+        <p class="comparison-footnote">실제 AI 분석은 아직 연결되지 않았습니다. 예시는 선택이나 궤적에 따라 생성되지 않습니다.</p>
+      </section>
       <div class="result-compare"><span>색을 바꾸면 느낌도 달라질까요?</span><div class="segmented" role="group" aria-label="결과 색상 비교"><button id="result-color-speed" aria-pressed="true">속도별 색</button><button id="result-color-mono" aria-pressed="false">단색</button></div></div>
       <div class="trace-stats"><span><b id="result-duration">10.0</b> 초의 움직임</span><span><b id="result-strokes">1</b> 개의 획</span></div>
       <div class="result-actions"><button class="primary" id="restart">새로운 움직임 만들기 <span aria-hidden="true">↗</span></button><button class="text-button" id="export">↓ 잔상 이미지 저장</button></div>

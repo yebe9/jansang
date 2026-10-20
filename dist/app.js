@@ -23,6 +23,8 @@
   let colorMode = 'speed';
   let playbackRate = 1;
   let dirty = true;
+  let intendedFeeling = '';
+  let showComparisonDemo = false;
   let gl, program, buffer, position, color, edge, opacity;
   let lost = false;
   const STRIDE = 7;
@@ -198,8 +200,39 @@
   }
 
   function resetFeelings() {
+    intendedFeeling = '';
+    showComparisonDemo = false;
+    $('intent-detail').value = '';
     document.querySelectorAll('.feelings button').forEach(b=>b.setAttribute('aria-pressed','false'));
-    $('feeling-note').textContent = '정답은 없어요. 느껴지는 대로 골라보세요.';
+    updateComparison();
+  }
+
+  // 화면 프로토타입: API 호출이나 규칙 기반 궤적 해석을 수행하지 않는다.
+  // 예시는 모든 기록에서 동일하며, 사용자의 의도와 무관하게 고정되어 있다.
+  function updateComparison() {
+    const detail = $('intent-detail').value.trim();
+    $('intent-word').textContent = intendedFeeling || (detail ? '나만의 표현' : '선택 전');
+    $('intent-summary').textContent = detail || (intendedFeeling ? '내가 이 움직임으로 표현하려던 느낌입니다.' : '표현하려던 느낌을 위에서 남겨주세요.');
+    $('feeling-note').textContent = intendedFeeling || detail ? '의도를 남겼어요. 서버로 보내지 않고 이 화면에만 보관합니다.' : '단어를 고르거나 직접 적어주세요. 이 화면에만 남습니다.';
+    $('comparison-demo').hidden = !showComparisonDemo;
+    $('ai-example-badge').hidden = !showComparisonDemo;
+    $('comparison-toggle').setAttribute('aria-expanded', String(showComparisonDemo));
+    $('comparison-toggle').textContent = showComparisonDemo ? '해석 예시 닫기' : 'AI 해석 예시 보기';
+    $('ai-word').textContent = showComparisonDemo ? '망설이는' : '연결 대기';
+    $('ai-summary').textContent = showComparisonDemo ? '비교 UI를 보여주기 위한 고정된 예시 단어입니다.' : 'API 연결 후 실제 해석이 표시될 자리입니다.';
+    if (!intendedFeeling && !detail) {
+      $('comparison-verdict').textContent = '내 의도를 먼저 남겨보세요.';
+      $('comparison-explanation').textContent = '선택한 표현과 고정된 예시를 나란히 비교합니다.';
+    } else if (!intendedFeeling) {
+      $('comparison-verdict').textContent = '내 문장과 예시를 비교해보세요.';
+      $('comparison-explanation').textContent = '자유롭게 적은 의도는 자동 판정하지 않습니다. 예시 문장과 어떤 점이 다르게 느껴지나요?';
+    } else if (intendedFeeling === '망설이는') {
+      $('comparison-verdict').textContent = '선택한 단어와 예시 단어가 같아요.';
+      $('comparison-explanation').textContent = '둘 다 ‘망설이는’이지만, 같은 이유로 그렇게 느꼈을까요? 실제 AI가 의도를 맞혔다는 뜻은 아닙니다.';
+    } else {
+      $('comparison-verdict').textContent = '서로 다른 단어가 놓였어요.';
+      $('comparison-explanation').textContent = '내 의도는 ‘' + intendedFeeling + '’, 예시는 ‘망설이는’입니다. 실제 해석이 이렇게 다르다면 무엇이 다르게 전달된 걸까요?';
+    }
   }
 
   function refresh() {
@@ -330,7 +363,7 @@
     releasePointer();
     mode='complete';
     showResult();
-    announce('움직임을 기록했습니다. 어떤 움직임이 느껴지는지 골라보세요.');
+    announce('움직임을 기록했습니다. 의도한 느낌을 남기고 비교 화면을 살펴보세요.');
   }
 
   function closeSettings(restoreFocus=true) {
@@ -434,9 +467,14 @@
     const selected=button.getAttribute('aria-pressed')==='true';
     document.querySelectorAll('.feelings button').forEach(b=>b.setAttribute('aria-pressed','false'));
     button.setAttribute('aria-pressed',String(!selected));
-    const word=button.textContent.trim().split(/\s+/).pop();
-    $('feeling-note').textContent=selected ? '정답은 없어요. 느껴지는 대로 골라보세요.' : '‘'+word+'’ 움직임으로 느꼈군요. 이 화면에만 기록됩니다.';
+    intendedFeeling = selected ? '' : button.dataset.feeling;
+    updateComparison();
   }));
+  $('intent-detail').addEventListener('input',updateComparison);
+  $('comparison-toggle').addEventListener('click',()=>{
+    showComparisonDemo = !showComparisonDemo;
+    updateComparison();
+  });
   $('export').addEventListener('click',()=>{
     if(lost || !points.length) return;
     render();
