@@ -17,6 +17,11 @@
 #camera-status{font-size:10px;line-height:1.7;color:#becfc2;min-height:32px;margin:10px 0}
 .camera-panel .primary{width:100%;font-size:11px;padding:10px;min-height:40px}
 .camera-note{font-size:9px;color:#8da597;line-height:1.7;margin:10px 0 0}
+.camera-select-label{display:block;color:#a7bfb0;font-size:10px;margin:12px 0 6px}
+#camera-select{width:100%;min-width:0;padding:9px 6px;border:1px solid #658b7b66;border-radius:6px;background:#142329;color:#dce7de;font-size:10px}
+#camera-select option{background:#142329;color:#dce7de}
+.camera-retry{width:100%;border:1px solid #dfa18480;border-radius:6px;background:#31332f;color:#f0c7ac;font-size:11px;padding:10px;margin:0 0 8px}
+#camera-switch-note{display:block;margin-top:6px;font-size:9px}
 .analysis-status{font-size:10px;line-height:1.85;color:#e2b99c;margin:15px 0}
 .analysis-evidence{border-left:2px solid #8baf9a;padding:2px 0 2px 13px;margin:17px 0}
 .analysis-evidence h3{font-size:11px;font-weight:500;color:#c1d3c5;margin:0 0 9px}

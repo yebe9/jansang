@@ -1,8 +1,8 @@
 /* Webcam pose input for JANSANG.
  *
  * Usage:
- *   const camera = new JansangPoseCamera({ video, overlay, onFrame, onStatus });
- *   await camera.start(); // true when ready, false when cancelled by stop()
+ *   const camera = new JansangPoseCamera({ video, overlay, onFrame, onStatus, onDevices });
+ *   await camera.start({ deviceId }); // optional exact camera; true when ready
  *   camera.stop();        // releases webcam tracks and the detector immediately
  *
  * video: HTMLVideoElement; overlay: HTMLCanvasElement laid over that video.
@@ -13,6 +13,8 @@
  * index order. x is mirrored; x/y are clamped to [0, 1]. Low-confidence / absent
  * people produce []. Consumers must also check each joint's visibility >= 0.5.
  * onStatus({ kind, message }): loading | ready | tracking | missing | error.
+ * onDevices({ devices, selectedDeviceId }): video inputs after permission;
+ * devices contains only { deviceId, label }. Selection stays in this session.
  * start() rejects an Error with a Korean message after emitting error status.
  * stop() is idempotent, including during pending permission or model downloads.
  *
@@ -75,6 +77,9 @@
     if (stream) stream.getTracks().forEach(track => track.stop());
   }
 
+  const isVirtualCamera = label => /mirametrix|virtual|\bobs\b/i.test(label || '');
+  const isInfraredCamera = label => /\bir\b|infrared|depth/i.test(label || '');
+
   function closeDetector(detector) {
     if (detector) {
       try { detector.close(); } catch (_) { /* Already released by the browser. */ }
@@ -104,13 +109,14 @@
   }
 
   class JansangPoseCamera {
-    constructor({ video, overlay, onFrame = () => {}, onStatus = () => {} }) {
+    constructor({ video, overlay, onFrame = () => {}, onStatus = () => {}, onDevices = () => {} }) {
       if (!video || !overlay) throw new Error('카메라 미리보기 요소가 필요해요.');
       this.video = video;
       this.overlay = overlay;
       this.context = overlay.getContext('2d');
       this.onFrame = onFrame;
       this.onStatus = onStatus;
+      this.onDevices = onDevices;
       this._generation = 0;
       this._raf = 0;
       this._stream = null;
@@ -141,7 +147,7 @@
       this.onStatus({ kind, message });
     }
 
-    async start() {
+    async start({ deviceId } = {}) {
       this.stop();
       const generation = this._generation;
       const controller = new AbortController();
@@ -154,20 +160,59 @@
           throw new Error('이 브라우저에서는 카메라를 사용할 수 없어요. HTTPS 주소 또는 localhost에서 열어 주세요.');
         }
 
-        const streamPromise = navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: 'user',
-            width: { ideal: 640, max: 960 },
-            height: { ideal: 480, max: 720 },
-            frameRate: { ideal: 15, max: 30 }
+        const openStream = async selectedId => {
+          if (!current()) throw abortError();
+          const streamPromise = navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              ...(selectedId ? { deviceId: { exact: selectedId } } : { facingMode: 'user' }),
+              width: { ideal: 640, max: 960 },
+              height: { ideal: 480, max: 720 },
+              frameRate: { ideal: 15, max: 30 }
+            }
+          });
+          // getUserMedia cannot be aborted, including a camera replacement.
+          streamPromise.then(stream => { if (!current()) stopTracks(stream); }, () => {});
+          const stream = await cancellable(streamPromise, controller.signal);
+          if (!current()) { stopTracks(stream); throw abortError(); }
+          this._stream = stream;
+          return stream;
+        };
+        let stream = await openStream(deviceId);
+        let devices = [];
+        if (navigator.mediaDevices.enumerateDevices) {
+          try {
+            const inputs = await cancellable(navigator.mediaDevices.enumerateDevices(), controller.signal);
+            devices = inputs.filter(device => device.kind === 'videoinput' && device.deviceId)
+              .map(({ deviceId, label }) => ({ deviceId, label }));
+          } catch (error) {
+            if (!current()) throw error;
+            // Some embedded browsers allow capture but do not list devices.
           }
-        });
-        // getUserMedia cannot be aborted. Release a stream that arrives late.
-        streamPromise.then(stream => { if (!current()) stopTracks(stream); }, () => {});
-        const stream = await cancellable(streamPromise, controller.signal);
-        if (!current()) { stopTracks(stream); return false; }
-        this._stream = stream;
+        }
+        const initialTrack = stream.getVideoTracks()[0];
+        let selectedId = deviceId || initialTrack?.getSettings?.().deviceId || '';
+        if (!deviceId && isVirtualCamera(initialTrack?.label)) {
+          const physical = devices.find(device => device.label && device.deviceId !== selectedId &&
+            !isVirtualCamera(device.label) && !isInfraredCamera(device.label));
+          if (physical) {
+            // A virtual camera can supply a "camera off" image as valid frames.
+            // Release it before opening the real camera it may itself depend on.
+            stopTracks(stream);
+            this._stream = null;
+            this._emitStatus('loading', '실제 카메라로 연결하고 있어요.');
+            stream = await openStream(physical.deviceId);
+            selectedId = physical.deviceId;
+          }
+        }
+        const selectedTrack = stream.getVideoTracks()[0];
+        selectedId = selectedTrack?.getSettings?.().deviceId || selectedId ||
+          devices.find(device => device.label === selectedTrack?.label)?.deviceId || '';
+        if (selectedId && !devices.some(device => device.deviceId === selectedId)) {
+          devices.push({ deviceId: selectedId, label: selectedTrack?.label || '현재 카메라' });
+        }
+        this.onDevices({ devices, selectedDeviceId: selectedId });
+        if (!current()) return false;
         for (const track of stream.getVideoTracks()) {
           const ended = () => {
             if (!current()) return;

@@ -14,6 +14,17 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function cameraStream(label = 'Camera', deviceId = 'camera') {
+  const track = new EventTarget();
+  track.readyState = 'live';
+  track.label = label;
+  track.getSettings = () => ({ deviceId });
+  track.stopped = 0;
+  track.stop = () => { track.stopped++; };
+  const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+  return { track, stream };
+}
+
 function fixture() {
   let nextRaf = 1;
   const scheduled = new Map();
@@ -30,20 +41,17 @@ function fixture() {
   };
   vm.createContext(context);
   vm.runInContext(source, context);
-  const track = new EventTarget();
-  track.readyState = 'live';
-  track.stopped = 0;
-  track.stop = () => { track.stopped++; };
-  const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+  const { track, stream } = cameraStream();
   const video = {
     style: {}, setAttribute() {}, play: () => Promise.resolve(), pause() {},
     readyState: 4, currentTime: 0, videoWidth: 640, videoHeight: 480
   };
   const paint = { clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {} };
   const overlay = { style: {}, width: 640, height: 480, getContext: () => paint };
-  const frames = [], statuses = [];
+  const frames = [], statuses = [], deviceReports = [];
   const camera = new context.window.JansangPoseCamera({
-    video, overlay, onFrame: frame => frames.push(frame), onStatus: status => statuses.push(status)
+    video, overlay, onFrame: frame => frames.push(frame), onStatus: status => statuses.push(status),
+    onDevices: report => deviceReports.push(report)
   });
   let closed = 0, calls = 0;
   let raw = Array.from({ length: 33 }, () => ({ x: 0.25, y: 0.4, z: 0.1, visibility: 0.9 }));
@@ -60,7 +68,7 @@ function fixture() {
     entry[1](timestamp);
   }
   return {
-    camera, track, stream, video, frames, statuses, detector, context, scheduled, frame,
+    camera, track, stream, video, frames, statuses, deviceReports, detector, context, scheduled, frame,
     get closed() { return closed; }, get calls() { return calls; },
     setRaw(value) { raw = value; }
   };
@@ -159,6 +167,95 @@ test('permission denial reports an actionable Korean error', async () => {
   await assert.rejects(f.camera.start(), /권한/);
   assert.equal(f.statuses.at(-1).kind, 'error');
   assert.equal(f.video.srcObject, null);
+});
+
+test('virtual default camera switches to a normal physical camera before playback', async () => {
+  const f = fixture();
+  const virtual = cameraStream('Mirametrix Virtual Camera', 'virtual');
+  const physical = cameraStream('LGE Camera', 'physical');
+  const requests = [];
+  f.context.navigator.mediaDevices.enumerateDevices = async () => [
+    { kind: 'videoinput', deviceId: 'virtual', label: virtual.track.label },
+    { kind: 'videoinput', deviceId: 'ir', label: 'LGE IR-FHD Camera' },
+    { kind: 'videoinput', deviceId: 'physical', label: physical.track.label },
+    { kind: 'audioinput', deviceId: 'microphone', label: 'Microphone' }
+  ];
+  f.context.navigator.mediaDevices.getUserMedia = async constraints => {
+    requests.push(constraints);
+    if (requests.length === 1) return virtual.stream;
+    assert.equal(virtual.track.stopped, 1, 'Release virtual input before opening its physical camera');
+    return physical.stream;
+  };
+  assert.equal(await f.camera.start(), true);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].video.deviceId.exact, 'physical');
+  assert.ok(requests.every(request => request.audio === false));
+  assert.equal(f.video.srcObject, physical.stream);
+  assert.equal(f.deviceReports.length, 1);
+  assert.equal(f.deviceReports[0].selectedDeviceId, 'physical');
+  assert.equal(f.deviceReports[0].devices.length, 3);
+  f.camera.stop();
+  assert.equal(physical.track.stopped, 1);
+  assert.equal(virtual.track.stopped, 1);
+});
+
+test('explicit camera selection is exact and is never automatically replaced', async () => {
+  const f = fixture();
+  f.track.label = 'OBS Virtual Camera';
+  f.track.getSettings = () => ({ deviceId: 'chosen' });
+  const requests = [];
+  f.context.navigator.mediaDevices.enumerateDevices = async () => [
+    { kind: 'videoinput', deviceId: 'chosen', label: f.track.label },
+    { kind: 'videoinput', deviceId: 'physical', label: 'LGE Camera' }
+  ];
+  f.context.navigator.mediaDevices.getUserMedia = async constraints => {
+    requests.push(constraints);
+    return f.stream;
+  };
+  assert.equal(await f.camera.start({ deviceId: 'chosen' }), true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].video.deviceId.exact, 'chosen');
+  assert.equal(requests[0].audio, false);
+  assert.equal(f.deviceReports[0].selectedDeviceId, 'chosen');
+  assert.equal(f.video.srcObject, f.stream);
+  f.camera.stop();
+});
+
+test('cancelling during physical camera replacement releases the late stream', async () => {
+  const f = fixture();
+  f.track.label = 'Mirametrix Virtual Camera';
+  const physical = cameraStream('LGE Camera', 'physical');
+  const replacement = deferred();
+  let requests = 0;
+  f.context.navigator.mediaDevices.enumerateDevices = async () => [
+    { kind: 'videoinput', deviceId: 'physical', label: physical.track.label }
+  ];
+  f.context.navigator.mediaDevices.getUserMedia = () =>
+    ++requests === 1 ? Promise.resolve(f.stream) : replacement.promise;
+  const pending = f.camera.start();
+  await new Promise(setImmediate);
+  assert.equal(requests, 2);
+  assert.equal(f.track.stopped, 1);
+  f.camera.stop();
+  assert.equal(await pending, false);
+  replacement.resolve(physical.stream);
+  await new Promise(setImmediate);
+  assert.equal(physical.track.stopped, 1);
+  assert.equal(f.video.srcObject, null);
+  assert.equal(f.deviceReports.length, 0);
+  assert.equal(f.scheduled.size, 0);
+});
+
+test('device enumeration failure still starts the permitted camera', async () => {
+  const f = fixture();
+  f.context.navigator.mediaDevices.enumerateDevices = async () => { throw new Error('Unavailable'); };
+  assert.equal(await f.camera.start(), true);
+  assert.equal(f.video.srcObject, f.stream);
+  assert.equal(f.deviceReports[0].devices.length, 1);
+  assert.equal(f.deviceReports[0].devices[0].deviceId, 'camera');
+  assert.equal(f.deviceReports[0].devices[0].label, 'Camera');
+  assert.equal(f.deviceReports[0].selectedDeviceId, 'camera');
+  f.camera.stop();
 });
 
 test('disconnected camera stops capture and reports an error', async () => {

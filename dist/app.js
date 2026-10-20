@@ -33,6 +33,7 @@
   let cameraMessage = '';
   let cameraReady = false;
   let cameraRequested = false;
+  let cameraDeviceId = '';
   let poseFrames = [];
   let poseSegment = 0;
   let wristTracks = new Map();
@@ -384,6 +385,11 @@
       $('camera-status').textContent = cameraMessage;
       $('camera-record').hidden = cameraRequested || points.length > 0;
       $('camera-record').disabled = !cameraReady || cameraKind !== 'tracking' || lost;
+      $('camera-select').disabled = cameraKind === 'loading' || hasPoints;
+      $('camera-retry').hidden = cameraKind !== 'error';
+      $('camera-switch-note').textContent = hasPoints
+        ? '카메라는 새 기록을 시작할 때 바꿀 수 있어요.'
+        : '영상에 X가 보이면 실제 카메라를 선택해 주세요.';
     }
     $('stage-guide').hidden = result || mode === 'recording';
     $('stage-guide').classList.toggle('paused',mode === 'paused');
@@ -392,8 +398,8 @@
       $('guide-copy').textContent = '시간도 함께 멈췄어요. 이어 그리거나 결과를 만나보세요.';
     } else if(mode === 'armed') {
       if (captureSource === 'webcam') {
-        $('guide-title').textContent = cameraReady ? (cameraRequested ? '당신의 움직임을 기다려요.' : '몸으로 남기는, 작은 잔상.') : '움직임을 만날 준비 중';
-        $('guide-copy').textContent = cameraRequested ? '어깨와 손을 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.' : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
+        $('guide-title').textContent = cameraKind === 'error' ? '카메라 연결을 확인해 주세요.' : cameraReady ? (cameraRequested ? '당신의 움직임을 기다려요.' : '몸으로 남기는, 작은 잔상.') : '움직임을 만날 준비 중';
+        $('guide-copy').textContent = cameraKind === 'error' ? '왼쪽에서 카메라를 바꾸거나 다시 연결할 수 있어요.' : cameraRequested ? '어깨와 손을 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.' : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
       } else {
         $('guide-title').textContent = hasPoints ? '움직임을 이어가볼까요?' : '여기서, 당신의 움직임을.';
         $('guide-copy').textContent = '마우스나 손가락을 누른 채 움직여보세요.';
@@ -456,29 +462,51 @@
 
   async function startCamera() {
     const id = takeId;
+    camera?.stop();
+    camera = null;
+    wristTracks.clear();
     cameraKind = 'loading';
     cameraMessage = '카메라와 자세 인식 모델을 준비하고 있어요.';
     cameraReady = false;
-    cameraRequested = false;
+    cameraRequested = points.length > 0;
     $('camera-panel').hidden = false;
-    const current = new window.JansangPoseCamera({
-      video:$('camera-video'), overlay:$('camera-overlay'),
-      onStatus(status) {
-        if (id !== takeId || view !== 'drawing') return;
-        cameraKind = status.kind;
-        cameraMessage = status.message;
-        if (status.kind === 'error') {
-          pauseRecording();
-          cameraReady = false;
-        }
-        refresh();
-      },
-      onFrame:receivePose
-    });
-    camera = current;
+    let current = null;
     refresh();
     try {
-      const ready = await current.start();
+      if (!window.JansangPoseCamera) throw new Error('카메라 기능을 불러오지 못했어요. 페이지를 새로고침해 주세요.');
+      current = new window.JansangPoseCamera({
+        video:$('camera-video'), overlay:$('camera-overlay'),
+        onDevices({devices, selectedDeviceId}) {
+          if (id !== takeId || camera !== current || view !== 'drawing') return;
+          const automatic = document.createElement('option');
+          automatic.value = '';
+          automatic.textContent = '자동 선택';
+          const options = devices.map((device, index) => {
+            const option = document.createElement('option');
+            option.value = device.deviceId;
+            option.textContent = device.label || `카메라 ${index + 1}`;
+            return option;
+          });
+          $('camera-select').replaceChildren(automatic, ...options);
+          cameraDeviceId = selectedDeviceId || '';
+          $('camera-select').value = cameraDeviceId;
+        },
+        onStatus(status) {
+          if (id !== takeId || camera !== current || view !== 'drawing') return;
+          cameraKind = status.kind;
+          cameraMessage = status.message;
+          if (status.kind === 'error') {
+            pauseRecording();
+            cameraReady = false;
+          }
+          refresh();
+        },
+        onFrame(frame) {
+          if (id === takeId && camera === current) receivePose(frame);
+        }
+      });
+      camera = current;
+      const ready = await current.start({deviceId:cameraDeviceId});
       if (id !== takeId || camera !== current || view !== 'drawing') { current.stop(); return; }
       cameraReady = ready;
       if (ready) captureAspect = ($('camera-video').videoWidth || 640) / ($('camera-video').videoHeight || 480);
@@ -709,6 +737,15 @@
   $('start').addEventListener('click',startDrawing);
   $('input-pointer').addEventListener('click',()=>setInputMode('pointer'));
   $('input-webcam').addEventListener('click',()=>setInputMode('webcam'));
+  $('camera-select').addEventListener('change',()=>{
+    if (view !== 'drawing' || captureSource !== 'webcam' || points.length || cameraKind === 'loading') return;
+    cameraDeviceId = $('camera-select').value;
+    startCamera();
+  });
+  $('camera-retry').addEventListener('click',()=>{
+    if (view !== 'drawing' || captureSource !== 'webcam' || cameraKind !== 'error') return;
+    startCamera();
+  });
   $('camera-record').addEventListener('click',()=>{
     if (!cameraReady || cameraKind !== 'tracking') return;
     closeSettings(false);

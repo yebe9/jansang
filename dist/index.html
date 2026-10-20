@@ -6,11 +6,11 @@
   <meta name="theme-color" content="#111b20">
   <meta name="description" content="10초의 움직임이 하나의 잔상으로. 움직임을 그리고, 멈추고, 다시 바라보는 WebGL 실험.">
   <title>잔상 — 움직임을 남기는 방법</title>
-  <link rel="stylesheet" href="./styles.css?v=20261020-webcam">
+  <link rel="stylesheet" href="./styles.css?v=20261020-camera">
   <script src="./config.js?v=20261020-webcam" defer></script>
-  <script src="./pose-camera.js?v=20261020-webcam" defer></script>
+  <script src="./pose-camera.js?v=20261020-camera" defer></script>
   <script src="./motion-analysis.js?v=20261020-webcam" defer></script>
-  <script src="./app.js?v=20261020-live-ai" defer></script>
+  <script src="./app.js?v=20261020-camera" defer></script>
 </head>
 <body data-view="intro">
   <header class="header">
@@ -93,7 +93,11 @@
   <section class="camera-panel" id="camera-panel" aria-label="웹캠 움직임 인식" hidden>
     <div class="camera-heading"><span>LIVE / POSE</span><button id="camera-cancel" aria-label="웹캠 종료하고 입력 선택으로 돌아가기">×</button></div>
     <div class="camera-preview"><video id="camera-video" autoplay playsinline muted aria-label="거울 방향 웹캠 미리보기"></video><canvas id="camera-overlay" aria-hidden="true"></canvas></div>
+    <label class="camera-select-label" for="camera-select">사용할 카메라</label>
+    <select id="camera-select" disabled aria-describedby="camera-switch-note"><option value="">자동 선택</option></select>
+    <p id="camera-switch-note" class="camera-note">영상에 X가 보이면 실제 카메라를 선택해 주세요.</p>
     <p id="camera-status" role="status">카메라를 준비하고 있어요.</p>
+    <button class="camera-retry" id="camera-retry" hidden>카메라 다시 연결</button>
     <button class="primary" id="camera-record" disabled>10초 기록 시작 <span aria-hidden="true">↗</span></button>
     <p class="camera-note">어깨와 양손이 화면에 보이게 서주세요.<br>양 손목의 움직임이 잔상으로 남습니다.</p>
   </section>

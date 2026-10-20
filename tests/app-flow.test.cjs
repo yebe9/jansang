@@ -13,7 +13,7 @@ const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve();
 
 // A deliberately small event surface: rendering and camera hardware are mocked,
 // while app.js, motion measurements, event handlers and request bodies are real.
-function createApp({ fetchResponse } = {}) {
+function createApp({ fetchResponse, cameraStart } = {}) {
   let now = 0;
   let animation;
   const timers = new Map();
@@ -103,7 +103,19 @@ function createApp({ fetchResponse } = {}) {
       this.stopped = false;
       cameras.push(this);
     }
-    async start() {
+    async start({ deviceId = '' } = {}) {
+      this.requestedDeviceId = deviceId;
+      this.options.onDevices({
+        devices: [
+          { deviceId: 'built-in', label: 'Built-in camera' },
+          { deviceId: 'usb-camera', label: 'USB camera' },
+        ],
+        selectedDeviceId: deviceId || 'built-in',
+      });
+      if (cameraStart) {
+        const ready = await cameraStart(this);
+        if (ready !== undefined) return ready;
+      }
       this.options.onStatus({ kind: 'ready', message: 'Mock camera ready' });
       return true;
     }
@@ -224,6 +236,116 @@ test('tracking loss also opens a new recording segment, and finishing stops came
   assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
   assert.equal(camera.stopped, true);
   assert.ok(report.payload.metrics.pathLength < 0.15);
+});
+
+test('choosing a camera replaces the stream and ignores old callbacks, then locks selection after recording begins', async () => {
+  const app = createApp();
+  await app.click('input-webcam');
+  await app.click('start');
+  await flush();
+  const original = app.cameras[0];
+  const select = app.get('camera-select');
+  assert.equal(original.requestedDeviceId, '');
+  assert.deepEqual(select.children.map(option => [option.value, option.textContent]), [
+    ['', '자동 선택'], ['built-in', 'Built-in camera'], ['usb-camera', 'USB camera'],
+  ]);
+  assert.equal(select.value, 'built-in');
+  assert.equal(select.disabled, false);
+
+  select.value = 'usb-camera';
+  await select.dispatch('change');
+  await flush();
+  const replacement = app.cameras[1];
+  assert.equal(app.cameras.length, 2);
+  assert.equal(original.stopped, true);
+  assert.equal(replacement.requestedDeviceId, 'usb-camera');
+  assert.equal(select.value, 'usb-camera');
+  replacement.tracking();
+  await app.click('camera-record');
+  const countBefore = app.get('point-count').textContent;
+  original.options.onDevices({
+    devices: [{ deviceId: 'old-device', label: 'Stale device' }], selectedDeviceId: 'old-device',
+  });
+  original.options.onStatus({ kind: 'error', message: 'Stale camera failure' });
+  original.emit(500, landmarks());
+  assert.equal(select.value, 'usb-camera');
+  assert.equal(select.children.length, 3);
+  assert.equal(app.get('camera-status').textContent, 'Mock body tracked');
+  assert.equal(app.get('camera-retry').hidden, true);
+  assert.equal(app.get('point-count').textContent, countBefore, 'Replaced camera cannot append a pose');
+
+  record(replacement);
+  assert.equal(select.disabled, true);
+  select.value = 'built-in';
+  await select.dispatch('change');
+  await flush();
+  assert.equal(app.cameras.length, 2, 'Even a synthetic change cannot switch a recorded take');
+  assert.equal(replacement.stopped, false);
+  await app.click('finish');
+  assert.equal(app.reports.at(-1).report.sufficient, true);
+});
+
+test('a failed initial camera connection can be retried without leaving the recording screen', async () => {
+  let starts = 0;
+  const app = createApp({
+    cameraStart() {
+      if (++starts === 1) throw new Error('Camera is busy');
+    },
+  });
+  await app.click('input-webcam');
+  await app.click('start');
+  await flush();
+  assert.equal(app.document.body.dataset.view, 'drawing');
+  assert.equal(app.get('camera-status').textContent, 'Camera is busy');
+  assert.equal(app.get('camera-retry').hidden, false);
+  assert.equal(app.get('camera-record').disabled, true);
+
+  await app.click('camera-retry');
+  await flush();
+  assert.equal(app.cameras[0].stopped, true);
+  const replacement = app.cameras[1];
+  assert.equal(replacement.requestedDeviceId, 'built-in');
+  assert.equal(app.get('camera-retry').hidden, true);
+  assert.equal(app.get('camera-record').disabled, true, 'A connected camera still waits for body tracking');
+  replacement.tracking();
+  assert.equal(app.get('camera-record').disabled, false);
+  await app.click('camera-record');
+  record(replacement);
+  await app.click('finish');
+  assert.equal(app.reports.at(-1).input.source, 'webcam');
+  assert.equal(app.reports.at(-1).report.sufficient, true);
+});
+
+test('retrying after a camera error preserves the recorded segment and resumes only when requested', async () => {
+  const app = createApp();
+  const original = await app.startWebcam();
+  record(original);
+  const countBefore = app.get('point-count').textContent;
+  original.options.onStatus({ kind: 'error', message: 'Camera disconnected' });
+  assert.equal(app.get('camera-retry').hidden, false);
+  assert.match(app.get('stage-status').textContent, /PAUSE/);
+
+  await app.click('camera-retry');
+  await flush();
+  const replacement = app.cameras[1];
+  assert.equal(original.stopped, true);
+  assert.equal(replacement.requestedDeviceId, 'built-in');
+  assert.equal(app.get('point-count').textContent, countBefore);
+  assert.equal(app.get('camera-select').disabled, true);
+  assert.equal(app.get('camera-record').hidden, true);
+  replacement.tracking();
+  replacement.emit(4000, landmarks(0.95, 0.05));
+  assert.equal(app.get('point-count').textContent, countBefore, 'Reconnecting does not silently resume recording');
+  await app.click('pause');
+  record(replacement, 5000, 11, 0.7);
+  await app.click('finish');
+
+  const { input, report } = app.reports.at(-1);
+  assert.equal(input.durationMs, 1950, 'Reconnection time is excluded');
+  assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
+  assert.equal(input.poseFrames[0].joints.leftWrist[0], 0.2, 'The first take remains in the result');
+  assert.ok(report.payload.metrics.pathLength < 0.15, 'Reconnection does not draw a jump between takes');
+  assert.equal(replacement.stopped, true);
 });
 
 test('synthetic example retains its source and never auto-sends even when automatic AI is checked', async () => {
