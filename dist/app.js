@@ -415,7 +415,7 @@
       logOrigin = url.origin;
       logPending = {record,video:recordedVideo};
       logSent = false;
-      logPopup = window.open(url.href, 'ghosting-logbook', 'popup,width=1020,height=800');
+      logPopup = window.open(url.href, '_blank');
       if (!logPopup) throw new Error('로그 창이 차단됐어요. 팝업을 허용한 뒤 다시 저장해 주세요.');
       logMessage = '로그 창에서 로그인하면 이번 움직임을 비공개로 저장할 수 있어요.';
     } catch (error) {
