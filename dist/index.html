@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f3ee">
+  <meta name="description" content="몸의 형태 없이 움직임을 느낄 수 있을까? 마우스로 안무를 기록하고 WebGL 잔상으로 재생하는 작은 실험.">
+  <title>잔상 — 움직임을 남기는 방법</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <a class="brand" href="./" aria-label="잔상 홈"><span class="brand-mark" aria-hidden="true">✳</span><span>잔상<span class="brand-en">JANSANG</span></span></a>
+      <div class="header-note">MOVEMENT STUDY <span>001 — WEBGL</span></div>
+      <span class="wip"><span></span> WORK IN PROGRESS</span>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="title">
+        <div><p class="eyebrow">A SMALL EXPERIMENT IN MOVEMENT</p><h1 id="title">움직임이 지나간 자리<span>.</span></h1></div>
+        <p class="intro-copy">몸의 형태가 사라져도, 춤의 느낌은 남을까요?<br>마우스로 짧은 안무를 만들고, 그 잔상을 만나보세요.</p>
+      </section>
+
+      <section class="workspace" aria-label="움직임 실험실">
+        <div class="stage-column">
+          <div class="stage" id="stage">
+            <div class="grid" id="grid" aria-hidden="true"></div>
+            <canvas id="canvas" tabindex="0" aria-label="움직임을 그리는 무대. 기록하기를 누른 다음 마우스나 손가락을 누른 채 움직여보세요."></canvas>
+            <div class="stage-top"><span class="stage-label"><i id="state-dot"></i><span id="stage-status">EXAMPLE / 예시 움직임</span></span><span class="stage-number">STUDY — 001</span></div>
+            <div class="stage-guide" id="stage-guide" hidden><span class="guide-icon">↗</span><strong>여기서 움직임을 시작하세요</strong><span>누른 채 움직이면 기록됩니다 · 최대 10초</span></div>
+            <div class="stage-error" id="stage-error" hidden role="alert">WebGL을 시작할 수 없습니다.<br>브라우저의 하드웨어 가속 설정을 확인한 뒤 새로고침해 주세요.</div>
+            <div class="stage-bottom"><span><span class="tiny-cross">+</span> YOUR MOVEMENT, MADE VISIBLE</span><span id="point-count">0 POINTS</span></div>
+            <span class="stage-center" aria-hidden="true">+</span>
+          </div>
+
+          <div class="transport">
+            <button class="play-button" id="play" aria-label="움직임 재생"><span id="play-icon">▶</span></button>
+            <span class="time"><b id="current-time">00.0</b><span> / </span><span id="total-time">10.0</span></span>
+            <input type="range" id="timeline" min="0" max="1000" value="1000" aria-label="재생 위치">
+            <label class="playback-speed"><span class="sr-only">재생 속도</span><select id="playback-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option></select></label>
+            <button class="icon-button" id="export" title="현재 화면 PNG 저장" aria-label="현재 화면 PNG 저장">↓</button>
+          </div>
+          <p class="stage-caption"><span id="caption">예시 움직임이 표시되어 있어요. 재생하거나 나만의 움직임을 만들어보세요.</span><span class="keyboard-hint"><kbd>R</kbd> 기록 <kbd>Space</kbd> 재생</span></p>
+        </div>
+
+        <aside class="controls" aria-label="움직임 설정">
+          <div class="panel-title"><span class="eyebrow">YOUR CHOREOGRAPHY</span><span class="small-index">01 / 03</span></div>
+          <h2>작은 움직임, 하나.</h2>
+          <p class="panel-copy">원을 그려도, 잠시 멈춰도 좋아요.<br>빠르기와 망설임까지 남겨보세요.</p>
+          <button class="record-button" id="record"><span class="record-icon" aria-hidden="true"></span><span id="record-label">기록하기</span><span class="record-duration" id="record-duration">10 SEC</span></button>
+          <div class="secondary-actions"><button id="example">↗ 예시 불러오기</button><button id="clear">↺ 지우기</button></div>
+
+          <div class="control-section">
+            <div class="section-heading"><h3>움직임의 색</h3><span>COLOR</span></div>
+            <div class="segmented" role="group" aria-label="색상 표현"><button id="color-speed" class="selected" aria-pressed="true">속도에 따라</button><button id="color-mono" aria-pressed="false">한 가지 색</button></div>
+            <div class="color-scale" id="color-scale"><div></div><span>느리게</span><span>빠르게</span></div>
+            <p class="mono-note" id="mono-note" hidden>같은 움직임을 단색으로 비교해보세요.</p>
+          </div>
+
+          <div class="control-section">
+            <div class="section-heading"><label for="width">궤적의 굵기</label><output id="width-value" for="width">3</output></div>
+            <input type="range" id="width" min="1" max="7" step="0.5" value="3">
+            <label class="toggle-row" for="show-grid"><span>공간 가이드</span><input type="checkbox" id="show-grid" checked><span class="toggle" aria-hidden="true"></span></label>
+          </div>
+
+          <div class="feeling-section"><div class="section-heading"><h3>어떤 움직임으로 느껴지나요?</h3></div><div class="feelings" role="group" aria-label="움직임에 대한 인상"><button aria-pressed="false">유연한</button><button aria-pressed="false">경쾌한</button><button aria-pressed="false">날카로운</button><button aria-pressed="false">망설이는</button></div><p id="feeling-note">정답 없이, 느껴지는 대로 골라보세요.</p></div>
+        </aside>
+      </section>
+
+      <section class="steps" aria-label="체험 방법">
+        <article><span class="step-number">01</span><div><h3>움직임을 남기고</h3><p>기록하기를 누른 후, 무대 위에서<br>마우스나 손가락을 누른 채 움직여보세요.</p></div><span class="step-symbol" aria-hidden="true">↗</span></article>
+        <article><span class="step-number">02</span><div><h3>다시 바라보고</h3><p>원래의 리듬으로 재생해보세요.<br>색을 바꾸면 느낌도 달라지나요?</p></div><span class="step-symbol" aria-hidden="true">↻</span></article>
+        <article><span class="step-number">03</span><div><h3>느낌을 나누세요</h3><p>움직임에서 어떤 감정이 보였나요?<br>당신의 해석이 다음 실험의 시작입니다.</p></div><span class="step-symbol" aria-hidden="true">✳</span></article>
+      </section>
+      <details class="about"><summary>이 실험의 질문과 작동 방식 <span>+</span></summary><div><p><strong>몸의 모양 없이, 궤적과 속도만으로 춤의 느낌을 전달할 수 있을까?</strong> 마우스의 좌표와 시간을 기록하고, 점 사이의 속도를 색으로 바꿉니다. WebGL이 궤적을 빛으로 그리고, 저장된 시간에 맞춰 재생합니다.</p><p>실제 춤이나 신체 동작을 분석하는 도구는 아닙니다. 색은 감정을 판정하지 않으며, 인상 선택은 개인의 해석입니다. 움직임과 선택은 서버에 전송되지 않고, 새로고침하면 사라집니다. 마음에 드는 잔상은 아래 화살표 버튼으로 PNG로 저장할 수 있습니다.</p></div></details>
+    </main>
+    <footer><span>잔상 <span class="footer-divider">/</span> 움직임을 남기는 방법</span><span>BUILT WITH WEBGL <span class="footer-divider">·</span> PROTOTYPE 01</span></footer>
+  </div>
+  <div class="sr-only" id="announcement" role="status" aria-live="polite"></div>
+</body>
+</html>

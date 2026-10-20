@@ -1,0 +1,6 @@
+.codex-preview/
+node_modules/
+*.tar.gz
+*.zip
+preview.png
+.openai/
