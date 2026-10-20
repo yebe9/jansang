@@ -140,22 +140,20 @@ body[data-view=result]>.workspace .result-heading{display:none}
 .afterimage-mark .mark-line{stroke:#9bc9b4;stroke-width:1.6;fill:none;opacity:.75}
 .afterimage-mark .mark-light{stroke:#f0bea2;stroke-width:2.4;fill:none;stroke-dasharray:18 82;stroke-dashoffset:0;filter:drop-shadow(0 0 3px #e5b99a80)}
 .result-brand-mark{display:block;width:38px;height:38px;flex-shrink:0}
-.dialog-art{width:260px;max-width:100%;height:112px;margin:4px auto 22px}
+.dialog-art{width:250px;max-width:100%;height:100px;margin:10px auto 25px}
 .dialog-art .welcome-lines{position:absolute;inset:0;width:100%;height:100%;overflow:visible;stroke:none}
-.welcome-route{color:#9bc9b4;stroke:currentColor;stroke-linecap:round}
-.welcome-route.route-warm{color:#e4ad8f}
-.welcome-route .orbit-base{stroke-width:1;opacity:.22}
-.welcome-route .orbit-glow{stroke-width:5;stroke-dasharray:16 84;opacity:.12;filter:blur(2px)}
-.welcome-route .orbit-tail{stroke-width:1.5;stroke-dasharray:16 84;opacity:.9;filter:drop-shadow(0 0 3px currentColor)}
-.welcome-route .orbit-head{stroke-width:3;stroke-dasharray:.3 99.7;opacity:1}
-.dialog-art>.dialog-emblem{position:absolute;left:calc(50% - 28px);top:27px;width:56px;height:56px;padding:0;background:transparent}
-.dialog-emblem .afterimage-mark{stroke-width:1.6}
+.welcome-route{color:#a6c8b8;stroke:currentColor;stroke-linecap:round}
+.welcome-route .orbit-echo{stroke-width:1;opacity:.08;transform:translateY(5px)}
+.welcome-route .orbit-base{stroke-width:1;opacity:.28}
+.welcome-route .orbit-glow{--trace-alpha:.12;stroke-width:4;stroke-dasharray:0 78 22 0;opacity:.12;filter:blur(2px)}
+.welcome-route .orbit-tail{--trace-alpha:.8;stroke-width:1.4;stroke-dasharray:0 78 22 0;opacity:.8}
+.welcome-route .orbit-head{--trace-alpha:1;stroke:#ebc1a6;stroke-width:2.8;stroke-dasharray:.1 99.9;opacity:1;filter:drop-shadow(0 0 3px #ebc1a666)}
 @media(prefers-reduced-motion:no-preference){
   .afterimage-mark .mark-light{animation:trace-flow 5.8s linear infinite}
   .afterimage-mark .mark-echo-far{animation:echo-breathe 5.8s ease-in-out infinite}
   .afterimage-mark .mark-echo-near{animation:echo-breathe 5.8s ease-in-out -1s infinite}
-  .welcome-route .orbit-glow,.welcome-route .orbit-tail,.welcome-route .orbit-head{animation:trace-flow 6.4s linear infinite}
-  .route-warm .orbit-glow,.route-warm .orbit-tail,.route-warm .orbit-head{animation-duration:7.6s;animation-delay:-3.2s}
+  .welcome-route .orbit-glow,.welcome-route .orbit-tail,.welcome-route .orbit-head{animation:welcome-flow 7s linear infinite}
+  @keyframes welcome-flow{0%{stroke-dashoffset:100;opacity:0}8%{opacity:var(--trace-alpha)}88%{opacity:var(--trace-alpha)}100%{stroke-dashoffset:0;opacity:0}}
   @keyframes trace-flow{from{stroke-dashoffset:100}to{stroke-dashoffset:0}}
   @keyframes echo-breathe{0%,100%{opacity:.16}50%{opacity:.45}}
 }
