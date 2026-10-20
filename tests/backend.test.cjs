@@ -1,7 +1,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const handler = import('../api/handler.mjs');
-const providerMotion = async value => (await handler).compactMotion(value);
+const encoding = import('../api/motion-encoding.mjs');
+const providerMotion = async value => (await encoding).encodeMotion((await handler).compactMotion(value));
 const origin = 'https://yebe9.github.io';
 const env = { GEMINI_API_KEY: 'mock-server-key', ALLOWED_ORIGIN: origin };
 const motion = () => ({
@@ -102,9 +103,9 @@ test('full-body numeric samples reach Gemini while face coordinates are rejected
   const response = await handleApi(request(report.payload), { env, fetchImpl: async (_url, init) => {
     const body = JSON.parse(init.body);
     assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(report.payload));
-    assert.match(body.systemInstruction.parts[0].text, /스텝과 다리 리듬/);
-    assert.match(body.systemInstruction.parts[0].text, /숫자나 지표명은 description과 observations에 절대 나열하지 않는다/);
-    assert.match(body.systemInstruction.parts[0].text, /감정 관련 표현은 장면의 비유적 인상/);
+    assert.match(body.systemInstruction.parts[0].text, /발이 보이면 스텝/);
+    assert.match(body.systemInstruction.parts[0].text, /숫자·지표명·점수·진단은 쓰지 않는다/);
+    assert.match(body.systemInstruction.parts[0].text, /감정 어휘는 시각적 비유/);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 3);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.maxItems, 3);
     return goodResponse();
@@ -150,10 +151,9 @@ test('hand traces reach Gemini with the selected target and no unsupported whole
       const body = JSON.parse(init.body);
       assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(report.payload));
       const prompt = body.systemInstruction.parts[0].text;
-      assert.match(prompt, /source가 hand이면 웹캠으로 한 손 또는 두 손을 관측/);
-      assert.match(prompt, /전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다/);
-      assert.match(prompt, /handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목/);
-      assert.match(prompt, /전신 관절이나 fullBodyRatio가 없다는 이유로 손 기록을 불충분하다고 판단하지 않는다/);
+      assert.match(prompt, /hand는 손만 읽으며/);
+      assert.match(prompt, /handTarget=indexTip은 검지 끝, wrist는 손목을 우선/);
+      assert.match(prompt, /전신 관절이 없어도 손 감상은 가능/);
       return goodResponse();
     } });
     assert.equal(response.status, 200);
@@ -199,13 +199,12 @@ test('two complete observed hands fit the bounded request and reach Gemini as se
     const body = JSON.parse(init.body);
     assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(report.payload));
     const prompt = body.systemInstruction.parts[0].text;
-    assert.match(prompt, /해부학적 왼손·오른손을 뜻하지 않는다/);
-    assert.match(prompt, /두 손이 동시에 보인 연속 구간에서만/);
-    assert.match(prompt, /한 손씩 번갈아 관측된 기록으로 두 손의 협응을 상상하지 않는다/);
-    assert.match(prompt, /같은 시간 구간을 두 번 세지 않는다/);
-    assert.match(prompt, /두 손이 교차했다고 쓰려면 선택 지점들의 상대 위치가 실제로 교차한 근거/);
-    assert.match(prompt, /화면의 겹침만으로 실제 접촉을 단정할 수 없다/);
-    assert.match(prompt, /누락된 구간을 채워 전체 모양·교차·접촉·회전을 상상하지 않는다/);
+    assert.match(prompt, /손 id는 왼손·오른손이 아니다/);
+    assert.match(prompt, /두 손 관계는 동시에 보인 연속 구간에서만/);
+    assert.match(prompt, /상대 좌표 근거 없이 교차·회전을 만들거나/);
+    assert.match(prompt, /화면 겹침을 접촉으로 단정하지 않는다/);
+    assert.match(prompt, /큰 시간 공백·가림·누락을 채우지 말고/);
+    assert.match(prompt, /한 손의 움직임을 전체 정지로 오해하지 않는다/);
     assert.match(prompt, /잔상\(Ghosting\)/);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 3);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.maxItems, 3);
@@ -321,8 +320,8 @@ test('pause segment identifiers survive validation and reach the model', async (
   const response = await handleApi(request(segmented), { env, fetchImpl: async (_url, init) => {
     const body = JSON.parse(init.body);
     assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(segmented));
-    assert.match(body.systemInstruction.parts[0].text, /다른 segment 사이를 연결하거나/);
-    assert.match(body.systemInstruction.parts[0].text, /화면 대각선 길이를 1/);
+    assert.match(body.systemInstruction.parts[0].text, /손 id·segment·stroke가 다르거나 관측이 없어진 구간도 서로 연결하지 않는다/);
+    assert.match(body.systemInstruction.parts[0].text, /화면 대각선 기준 초당 거리/);
     return goodResponse();
   } });
   assert.equal(response.status, 200);
@@ -387,8 +386,9 @@ test('output schema keeps the supplied vocabulary and rejects missing prose or a
     const schema = body.generationConfig.responseSchema.properties;
     assert.deepEqual(schema.impression.enum, labels);
     assert.deepEqual(schema.qualities.items.enum, labels);
-    assert.equal(schema.observations.maxItems, 2);
-    assert.ok(DANCE_VOCABULARY.every(item => body.systemInstruction.parts[0].text.includes(item.label + ': ' + item.description)));
+    assert.equal(schema.observations.maxItems, 1);
+    assert.ok(DANCE_VOCABULARY.every(item => !body.systemInstruction.parts[0].text.includes(item.description)),
+      'Vocabulary definitions are not repeated in the prompt; exact allowed labels remain in both enums');
     return goodResponse();
   } });
   assert.equal(response.status, 200);
@@ -412,6 +412,32 @@ test('output schema keeps the supplied vocabulary and rejects missing prose or a
     assert.equal(result.analysis, undefined, 'Invalid AI output must not become a local substitute result');
     assert.equal(calls, 1, 'No hidden retries');
   }
+});
+
+test('request builder keeps all source safeguards in a short prompt and caps the encoded observations', async () => {
+  const { buildAnalysisRequest, compactMotion } = await handler;
+  const data = motion();
+  data.durationMs = 10000;
+  data.sampleCount = 60;
+  data.samples = Array.from({ length: 60 }, (_, i) => ({
+    t: i * 160, segment: i < 30 ? 0 : 1,
+    joints: { leftWrist: [0.2 + i / 200, 0.3], rightWrist: [0.8 - i / 200, 0.6] },
+  }));
+  const original = structuredClone(data);
+  const body = buildAnalysisRequest(data);
+  const encoded = JSON.parse(body.contents[0].parts[0].text);
+  const prompt = body.systemInstruction.parts[0].text;
+  assert.equal(encoded.encoding, 'motion-rows-v1');
+  assert.equal(encoded.rows.length, 24, 'The transport still caps observations regardless of motion speed');
+  assert.deepEqual(encoded, await providerMotion(data));
+  assert.deepEqual(data, original, 'Provider encoding must not change the browser recording');
+  assert.ok(prompt.length <= 1100, 'System instructions remain bounded instead of repeating all 50 definitions');
+  assert.match(prompt, /영상·얼굴·음성·사용자 의도는 없다/);
+  assert.match(prompt, /null은 미관측/);
+  assert.match(prompt, /breakBefore=1/);
+  assert.match(prompt, /pointer는 선만 읽고 example은 합성 예시임을 감상에 밝힌다/);
+  assert.ok(Buffer.byteLength(body.contents[0].parts[0].text) < Buffer.byteLength(JSON.stringify(compactMotion(data))));
+  assert.ok(!JSON.stringify(body).includes(env.GEMINI_API_KEY));
 });
 
 test('provider summary retains both targets, actual timing and identity boundaries within 24 frames', async () => {
@@ -485,9 +511,11 @@ test('a real deadline ends abort-ignoring fetches and stalled provider response 
   for (const stall of ['headers', 'body']) {
     let seenSignal;
     let calls = 0;
+    const diagnostics = [];
     const start = performance.now();
     const response = await handleApi(request(), {
       env, timeoutMs: 25,
+      onDiagnostic: event => diagnostics.push(event),
       fetchImpl: async (_url, init) => {
         calls += 1;
         seenSignal = init.signal;
@@ -500,6 +528,13 @@ test('a real deadline ends abort-ignoring fetches and stalled provider response 
     assert.ok(performance.now() - start < 500, 'Timeout must not wait for the stalled transport');
     assert.equal(seenSignal.aborted, true);
     assert.equal(calls, 1);
+    assert.equal(diagnostics[0].stage, 'provider_' + stall);
+    assert.equal(diagnostics[0].code, 'AI_TIMEOUT');
+    assert.ok(diagnostics[0].providerMs >= 0);
+    assert.ok(diagnostics[0].requestBytes > 0);
+    assert.ok(!('inputTokens' in diagnostics[0]), 'Timeout cannot invent unavailable usage counts');
+    assert.ok(!('outputTokens' in diagnostics[0]));
+    assert.ok(!('thoughtTokens' in diagnostics[0]));
   }
 });
 
@@ -588,7 +623,7 @@ test('provider region, key and permission failures are classified without exposi
     assert.equal(calls, 1, 'Configuration errors must not be retried');
     assert.ok(!JSON.stringify(result).includes(error.message));
     assert.equal(diagnostics.length, 1);
-    assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['attempts', 'code', 'elapsedMs']);
+    assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['attempts', 'code', 'elapsedMs', 'providerMs', 'requestBytes', 'stage']);
     assert.equal(diagnostics[0].attempts, 1);
     assert.ok(diagnostics[0].code.endsWith('HTTP_' + status));
     assert.ok(!JSON.stringify(diagnostics).includes(error.message));
@@ -666,7 +701,7 @@ test('transient 5xx and transport TypeError get at most one retry with one sanit
     assert.equal(diagnostics.length, 1);
     assert.equal(diagnostics[0].code, 'OK');
     assert.equal(diagnostics[0].attempts, 2);
-    assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['attempts', 'code', 'elapsedMs']);
+    assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['attempts', 'code', 'elapsedMs', 'providerMs', 'requestBytes', 'stage']);
   }
   let calls = 0;
   const response = await handleApi(request(), { env, fetchImpl: async () => {
@@ -675,6 +710,52 @@ test('transient 5xx and transport TypeError get at most one retry with one sanit
   } });
   assert.equal(response.status, 502);
   assert.equal(calls, 2, 'A persistent outage must not create a retry loop');
+});
+
+test('diagnostics report request bytes and actual numeric token usage without exposing request or response content', async () => {
+  const { handleApi } = await handler;
+  for (const usageMetadata of [
+    { promptTokenCount: 3210, candidatesTokenCount: 148, thoughtsTokenCount: 0, privateText: 'must stay private' },
+    { promptTokenCount: '3210', candidatesTokenCount: -1, thoughtsTokenCount: 1.5 },
+    undefined,
+  ]) {
+    const events = [];
+    let actualRequestBytes;
+    const response = await handleApi(request(), {
+      env, onDiagnostic: event => events.push(event),
+      fetchImpl: async (_url, init) => {
+        actualRequestBytes = Buffer.byteLength(init.body);
+        return new Response(JSON.stringify({
+          candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(validAnalysis) }] } }],
+          usageMetadata,
+        }));
+      },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(events.length, 1);
+    const event = events[0];
+    assert.equal(event.code, 'OK');
+    assert.equal(event.stage, 'complete');
+    assert.equal(event.attempts, 1);
+    assert.equal(event.requestBytes, actualRequestBytes, 'Measure UTF-8 transport bytes rather than string characters');
+    assert.ok(event.providerMs >= 0 && event.providerMs <= event.elapsedMs);
+    const validUsage = usageMetadata?.promptTokenCount === 3210;
+    assert.deepEqual(Object.keys(event).sort(), [
+      'attempts', 'code', 'elapsedMs', 'providerMs', 'requestBytes', 'stage',
+      ...(validUsage ? ['inputTokens', 'outputTokens', 'thoughtTokens'] : []),
+    ].sort());
+    if (validUsage) {
+      assert.equal(event.inputTokens, 3210);
+      assert.equal(event.outputTokens, 148);
+      assert.equal(event.thoughtTokens, 0);
+    }
+    for (const [key, value] of Object.entries(event)) {
+      if (!['code', 'stage'].includes(key)) assert.ok(Number.isSafeInteger(value) && value >= 0, key);
+    }
+    assert.ok(!JSON.stringify(event).includes(env.GEMINI_API_KEY));
+    assert.ok(!JSON.stringify(event).includes(validAnalysis.description));
+    assert.ok(!JSON.stringify(event).includes('must stay private'));
+  }
 });
 
 test('quota, non-transient errors and insufficient remaining time never spend another provider call', async () => {

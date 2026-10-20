@@ -6,8 +6,10 @@ export default {
       env,
       requireOrigin: true,
       // Operational metadata only; never log movement, AI text, or credentials.
-      onDiagnostic: ({ code, elapsedMs, attempts }) => {
-        console.info(JSON.stringify({ event: 'analysis', code, elapsedMs, attempts }));
+      onDiagnostic: ({ code, elapsedMs, attempts, stage, requestBytes, providerMs,
+        inputTokens, outputTokens, thoughtTokens }) => {
+        console.info(JSON.stringify({ event: 'analysis', code, elapsedMs, attempts, stage,
+          requestBytes, providerMs, inputTokens, outputTokens, thoughtTokens }));
       },
       checkLimit: async req => {
         // These Cloudflare counters are shared within a location, not a global billing cap.

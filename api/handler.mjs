@@ -1,6 +1,7 @@
 // Shared by the local Node server and the optional Cloudflare Worker.
 // Only numeric movement data crosses this boundary. No video or intention text.
 import { DANCE_VOCABULARY } from './dance-vocabulary.mjs';
+import { encodeMotion, ENCODING_GUIDE } from './motion-encoding.mjs';
 export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 export const MAX_BODY_BYTES = 100 * 1024;
 export const ANALYSIS_DEADLINE_MS = 29000;
@@ -39,29 +40,19 @@ const OUTPUT_SCHEMA = {
   type: 'OBJECT',
   properties: {
     impression: { type: 'STRING', enum: DANCE_LABELS, description: '제공된 50개 표현 중 대표 인상 하나' },
-    description: { type: 'STRING', description: '한국어 감상 두 문장, 합계 140자 이내. 숫자나 기술 용어 금지' },
-    observations: { type: 'ARRAY', items: { type: 'STRING', description: '관측 근거를 일상 언어로 짧게, 40자 이내' }, minItems: 1, maxItems: 2 },
+    description: { type: 'STRING', description: '한국어 감상 1~2문장, 합계 100자 이내. 숫자나 기술 용어 금지' },
+    observations: { type: 'ARRAY', items: { type: 'STRING', description: '관측 근거 한 문장, 40자 이내' }, minItems: 1, maxItems: 1 },
     qualities: { type: 'ARRAY', items: { type: 'STRING', enum: DANCE_LABELS }, minItems: 3, maxItems: 3 },
   },
   required: ['impression', 'description', 'observations', 'qualities'],
 };
 
-const SYSTEM_PROMPT = `너는 미디어아트 '잔상(Ghosting)'의 움직임 감상 도우미다. 숫자 좌표를 보고 시각적 질감·리듬·분위기를 한국어로 감상한다.
-대표 impression과 qualities는 아래 50개 표현의 정확한 표기만 사용한다. qualities는 서로 다른 세 표현이며 첫 항목은 impression이다.
-description은 짧은 두 문장, observations는 짧은 근거 1~2개다. 숫자나 지표명은 description과 observations에 절대 나열하지 않는다. JSON만 반환한다.
-원본 영상·얼굴·음성·사용자 의도는 제공되지 않는다. 실제 감정·정신 상태·의도·성격·건강·정체성·인구통계는 추론하지 않는다. 감정 관련 표현은 장면의 비유적 인상일 뿐이다. 어휘 풀이에 나와도 음악과 박자의 일치, 실제 근력·기술·완벽함·속마음을 확인했다고 쓰지 않는다. 점수·정확도·일치율·진단도 금지한다.
-좌표는 좌상단(0,0), 우하단(1,1), 웹캠은 거울 화면, t/durationMs는 ms다. 실제 관측을 요약한 최대 24프레임이며 없는 관절·가려진 동작을 상상하지 않는다.
-다른 segment 사이를 연결하거나 속도·방향을 추정하지 않는다. breakBefore:true도 앞 샘플과 단절이다. t는 일시정지 시간을 뺀 값이며 큰 시간 공백도 연결하지 않는다.
-source가 webcam이면 얼굴을 제외한 전신 최대22관절이다. 발이 보일 때 스텝과 다리 리듬도 읽는다. fullBodyRatio가 낮으면 보인 부위만 감상한다.
-source가 hand이면 웹캠으로 한 손 또는 두 손을 관측한 기록이다. hands 배열의 각 id/joints는 그 순간 보인 손이다. 손목과 손가락만 제공되므로 전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다.
-손 id는 해부학적 왼손·오른손을 뜻하지 않는다. ID가 바뀌거나 손이 사라지면 자취를 잇지 않는다. 손별 breakBefore:true도 단절이다. 두 손의 나란함·반대 방향·가까워짐·리듬 대비는 두 손이 동시에 보인 연속 구간에서만 읽는다. 한 손씩 번갈아 관측된 기록으로 두 손의 협응을 상상하지 않는다.
-두 손이 교차했다고 쓰려면 선택 지점들의 상대 위치가 실제로 교차한 근거가 있어야 한다. 회전도 연속 좌표의 명확한 근거 없이 만들지 않는다. 화면의 겹침만으로 실제 접촉을 단정할 수 없다. 누락된 구간을 채워 전체 모양·교차·접촉·회전을 상상하지 않는다.
-handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목을 우선 감상한다. hand joints는 손목·검지관절·다섯 손끝 중 실제 관측된 점만 요약했다. 전신 관절이나 fullBodyRatio가 없다는 이유로 손 기록을 불충분하다고 판단하지 않는다.
-source가 pointer이면 선의 궤적만 보았으며 신체·춤을 보았다고 쓰지 않는다. source가 example이면 합성 예시임을 description에 밝힌다.
-지표는 휴리스틱이다. meanSpeed/peakSpeed는 화면 대각선 길이를 1로 둔 초당 거리, pathLength는 이동거리다. webcam은 가장 활발한 상체/하체/몸통을, hand는 같은 구간에서 추적된 각 손의 선택지점 평균을 따른다. peakSpeed는 가장 빠른 점이며 trackedDurationMs는 같은 시간 구간을 두 번 세지 않는다. 한 손만 움직여도 전체 평균만으로 모두 정지했다고 하지 않는다.
-stillnessRatio=느린 시간비율, coverage=각 점이 연속 구간에서 이동한 최대 면적, spread=몸 관절의 퍼짐 또는 선택한 손 자취의 범위, tempoVariation=속도 변화, directionChangeRate=방향 전환, validFrameRatio=인식 비율이다. 큰 몸/손 자체를 역동성으로 착각하지 않는다. 누락·짧은 기록에는 확신을 낮춘다.
-표현과 뜻(어휘의 비유만 참고하며 실제 사람에 대한 단정은 금지):
-${DANCE_VOCABULARY.map(item => item.label + ': ' + item.description).join('\n')}`;
+const SYSTEM_PROMPT = `너는 '잔상(Ghosting)'의 움직임 감상 도우미다. 좌표의 질감·리듬·분위기를 한국어 JSON으로 답한다. impression과 qualities는 스키마 enum의 정확한 표현만 쓰고 qualities는 대표 표현부터 서로 다른 3개를 고른다. 감상 1~2문장과 근거 1개만 짧게 쓴다. 숫자·지표명·점수·진단은 쓰지 않는다.
+영상·얼굴·음성·사용자 의도는 없다. 실제 감정·정신 상태·의도·성격·건강·정체성은 추론하지 않는다. 감정 어휘는 시각적 비유이며 음악·실력도 단정하지 않는다.
+${ENCODING_GUIDE}
+좌표 원점은 좌상단이고 웹캠은 거울 화면이다. 최대 24프레임의 실제 관측만 읽는다. 큰 시간 공백·가림·누락을 채우지 말고 짧거나 불완전하면 확신을 낮춘다.
+webcam은 얼굴 없는 전신으로 보인 부위만, 발이 보이면 스텝도 읽는다. hand는 손만 읽으며 handTarget=indexTip은 검지 끝, wrist는 손목을 우선한다. 전신 관절이 없어도 손 감상은 가능하다. 손 id는 왼손·오른손이 아니다. 두 손 관계는 동시에 보인 연속 구간에서만 읽고 상대 좌표 근거 없이 교차·회전을 만들거나 화면 겹침을 접촉으로 단정하지 않는다.
+pointer는 선만 읽고 example은 합성 예시임을 감상에 밝힌다. 지표는 보조값이다. 속도는 화면 대각선 기준 초당 거리, hand 평균은 관측된 선택점의 평균이므로 한 손의 움직임을 전체 정지로 오해하지 않는다. 몸·손 자체의 크기를 역동성으로 보지 않는다.`;
 
 class ApiError extends Error {
   constructor(status, code, message, diagnosticCode = code) {
@@ -338,41 +329,53 @@ async function providerConfigError(response, signal) {
     'AI 서버의 모델 사용 권한 또는 API 설정을 확인해 주세요.', `PROVIDER_HTTP_${response.status}`);
 }
 
-async function analyze(motion, env, fetchImpl, signal, remainingMs, onAttempt) {
-  const model = env.GEMINI_MODEL || DEFAULT_MODEL;
+// Accepts validated motion. Shared by live requests and offline size checks;
+// credentials are deliberately supplied only at the HTTP transport boundary.
+export function buildAnalysisRequest(motion, model = DEFAULT_MODEL) {
   if (!/^gemini-[a-zA-Z0-9.-]+$/.test(model)) {
     throw new ApiError(503, 'MODEL_CONFIG', '서버의 AI 모델 설정을 확인해 주세요.');
   }
+  const generationConfig = {
+    temperature: 1,
+    maxOutputTokens: 1200,
+    responseMimeType: 'application/json',
+    responseSchema: OUTPUT_SCHEMA,
+  };
+  if (model === 'gemini-2.5-flash') generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  if (model === DEFAULT_MODEL) generationConfig.thinkingConfig = { thinkingLevel: 'MINIMAL' };
+  else if (model.startsWith('gemini-3.')) generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
+  return {
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: 'user', parts: [{ text: JSON.stringify(encodeMotion(compactMotion(motion))) }] }],
+    generationConfig,
+  };
+}
+
+async function analyze(motion, env, fetchImpl, signal, remainingMs, diagnostic) {
+  const model = env.GEMINI_MODEL || DEFAULT_MODEL;
   try {
     assertActive(signal);
-    const generationConfig = {
-      temperature: 1,
-      maxOutputTokens: 1200,
-      responseMimeType: 'application/json',
-      responseSchema: OUTPUT_SCHEMA,
-    };
-    if (model === 'gemini-2.5-flash') generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    if (model === DEFAULT_MODEL) generationConfig.thinkingConfig = { thinkingLevel: 'MINIMAL' };
-    else if (model.startsWith('gemini-3.')) generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
+    diagnostic.stage = 'prepare';
+    const body = JSON.stringify(buildAnalysisRequest(motion, model));
+    diagnostic.requestBytes = new TextEncoder().encode(body).byteLength;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     const options = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: 'user', parts: [{ text: JSON.stringify(compactMotion(motion)) }] }],
-        generationConfig,
-      }),
+      body,
       signal,
     };
     let response;
+    diagnostic.providerStartedAt = Date.now();
     for (let attempt = 0; attempt < 2; attempt++) {
       assertActive(signal);
-      onAttempt();
+      diagnostic.stage = 'provider_headers';
+      diagnostic.attempts++;
       try { response = await fetchImpl(url, options); }
       catch (error) {
         assertActive(signal);
         if (attempt === 0 && error instanceof TypeError && remainingMs() >= MIN_RETRY_BUDGET_MS) {
+          diagnostic.stage = 'retry_wait';
           await waitForRetry(signal);
           continue;
         }
@@ -382,6 +385,7 @@ async function analyze(motion, env, fetchImpl, signal, remainingMs, onAttempt) {
       if (attempt === 0 && RETRYABLE_STATUS.has(response.status) && remainingMs() >= MIN_RETRY_BUDGET_MS) {
         // Release the failed response without waiting on an error-body stream.
         Promise.resolve(response.body?.cancel()).catch(() => {});
+        diagnostic.stage = 'retry_wait';
         await waitForRetry(signal);
         continue;
       }
@@ -393,12 +397,26 @@ async function analyze(motion, env, fetchImpl, signal, remainingMs, onAttempt) {
       throw new ApiError(503, 'MODEL_UNAVAILABLE', '현재 AI 모델을 이 계정에서 사용할 수 없습니다. 서버의 모델 설정을 확인해 주세요.');
     }
     if ([400, 401, 403].includes(response.status)) {
+      diagnostic.stage = 'provider_body';
       throw await providerConfigError(response, signal);
     }
     if (!response.ok) throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'AI 서비스가 잠시 응답하지 않습니다. 나중에 다시 시도해 주세요.',
       `PROVIDER_HTTP_${response.status}`);
+    diagnostic.stage = 'provider_body';
     const payload = await response.json();
     assertActive(signal);
+    diagnostic.providerEndedAt = Date.now();
+    // Only provider-supplied numeric counts enter diagnostics. Missing usage
+    // never becomes an invented zero, estimate, or copy of response content.
+    for (const [field, providerField] of [
+      ['inputTokens', 'promptTokenCount'],
+      ['outputTokens', 'candidatesTokenCount'],
+      ['thoughtTokens', 'thoughtsTokenCount'],
+    ]) {
+      const count = payload?.usageMetadata?.[providerField];
+      if (Number.isSafeInteger(count) && count >= 0) diagnostic[field] = count;
+    }
+    diagnostic.stage = 'parse';
     const candidate = payload.candidates?.[0];
     if (!candidate || !['STOP', 'MAX_TOKENS'].includes(candidate.finishReason)) {
       throw new ApiError(502, 'INCOMPLETE_ANALYSIS', 'AI가 분석을 완성하지 못했습니다. 다시 시도해 주세요.');
@@ -435,7 +453,7 @@ export async function handleApi(request, {
   onDiagnostic,
 } = {}) {
   const startedAt = Date.now();
-  let attempts = 0;
+  const diagnostic = { attempts: 0, stage: 'request' };
   let diagnosticCode = 'OK';
   const url = new URL(request.url);
   const origin = request.headers.get('origin');
@@ -470,13 +488,16 @@ export async function handleApi(request, {
       throw new ApiError(503, 'NOT_CONFIGURED', 'AI 서버에 Gemini API 키가 아직 연결되지 않았습니다. 움직임 기록과 재생은 계속 사용할 수 있습니다.');
     }
     const result = await withDeadline(async (signal, remainingMs) => {
+      diagnostic.stage = 'input';
       const motion = validateMotion(await readBoundedJson(request, signal));
       assertActive(signal);
+      diagnostic.stage = 'rate_limit';
       const permitted = await checkLimit(request);
       assertActive(signal);
       if (!permitted) throw new ApiError(429, 'RATE_LIMITED', '분석 요청이 많습니다. 1분 뒤에 다시 시도해 주세요.');
-      return analyze(motion, env, fetchImpl, signal, remainingMs, () => { attempts++; });
+      return analyze(motion, env, fetchImpl, signal, remainingMs, diagnostic);
     }, timeoutMs);
+    diagnostic.stage = 'complete';
     return json(200, result);
   } catch (error) {
     const known = error instanceof ApiError;
@@ -489,9 +510,17 @@ export async function handleApi(request, {
   } finally {
     if (url.pathname === '/api/analyze' && request.method === 'POST' && typeof onDiagnostic === 'function') {
       try {
-        Promise.resolve(onDiagnostic({
-          code: diagnosticCode, elapsedMs: Math.max(0, Date.now() - startedAt), attempts
-        })).catch(() => {});
+        const event = {
+          code: diagnosticCode, elapsedMs: Math.max(0, Date.now() - startedAt),
+          attempts: diagnostic.attempts, stage: diagnostic.stage,
+        };
+        if (diagnostic.providerStartedAt !== undefined) {
+          event.providerMs = Math.max(0, (diagnostic.providerEndedAt ?? Date.now()) - diagnostic.providerStartedAt);
+        }
+        for (const field of ['requestBytes', 'inputTokens', 'outputTokens', 'thoughtTokens']) {
+          if (diagnostic[field] !== undefined) event[field] = diagnostic[field];
+        }
+        Promise.resolve(onDiagnostic(event)).catch(() => {});
       } catch {}
     }
   }
