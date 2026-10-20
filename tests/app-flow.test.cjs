@@ -8,12 +8,13 @@ const dist = path.join(__dirname, '..', 'dist');
 const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
 const appSource = fs.readFileSync(path.join(dist, 'app.js'), 'utf8');
 const motionSource = fs.readFileSync(path.join(dist, 'motion-analysis.js'), 'utf8');
+const similaritySource = fs.readFileSync(path.join(dist, 'feeling-similarity.js'), 'utf8');
 const copy = value => JSON.parse(JSON.stringify(value));
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
 // A deliberately small event surface: rendering and camera hardware are mocked,
 // while app.js, motion measurements, event handlers and request bodies are real.
-function createApp({ fetchResponse, cameraStart } = {}) {
+function createApp({ fetchResponse, cameraStart, automaticAI = false, hostname = '127.0.0.1' } = {}) {
   let now = 0;
   let animation;
   const timers = new Map();
@@ -86,6 +87,9 @@ function createApp({ fetchResponse, cameraStart } = {}) {
   for (const [, tag, attributes, id] of html.matchAll(/<([a-z][\w:-]*)\b([^>]*\bid="([^"]+)"[^>]*)>/gi)) {
     elements.set(id, new Element(tag, attributes));
   }
+  // Most camera lifecycle tests opt out of networking. Production HTML defaults
+  // to checked; automatic-AI tests explicitly retain that setting.
+  elements.get('ai-consent').checked = automaticAI;
   const feelings = [...html.matchAll(/<button\b([^>]*\bdata-feeling="([^"]+)"[^>]*)>/g)]
     .map(match => new Element('button', match[1]));
   const document = new Element();
@@ -139,7 +143,7 @@ function createApp({ fetchResponse, cameraStart } = {}) {
   window.JansangPoseCamera = Camera;
   window.JANSANG_CONFIG = { apiBase: '' };
   const context = vm.createContext({
-    window, document, location: { hostname: '127.0.0.1' },
+    window, document, location: { hostname },
     performance: { now: () => now }, URL, AbortController, Map, Set, Float32Array,
     ResizeObserver: class { observe() {} },
     requestAnimationFrame(callback) { animation = callback; return 1; },
@@ -154,6 +158,7 @@ function createApp({ fetchResponse, cameraStart } = {}) {
     },
   });
   vm.runInContext(motionSource, context, { filename: 'motion-analysis.js' });
+  vm.runInContext(similaritySource, context, { filename: 'feeling-similarity.js' });
   const analyze = window.JansangMotion.analyze;
   window.JansangMotion.analyze = input => {
     const report = analyze(input);
@@ -163,7 +168,7 @@ function createApp({ fetchResponse, cameraStart } = {}) {
   vm.runInContext(appSource, context, { filename: 'app.js' });
   assert.equal(failures.length, 0, 'WebGL initialization succeeded with the mock');
   return {
-    elements, document, cameras, reports, calls, timers,
+    elements, document, window, cameras, reports, calls, timers,
     get: id => elements.get(id),
     click: id => elements.get(id).click(),
     setTime: value => { now = value; },
@@ -246,7 +251,7 @@ const aiResult = {
 };
 const ok = body => ({ ok: true, json: async () => body });
 
-test('webcam recording pauses without joining movements across the gap and finishes into local analysis', async () => {
+test('webcam recording pauses without joining movements and keeps AI-only results pending when opted out', async () => {
   const app = createApp();
   assert.equal(app.get('start-dialog').open, true);
   const camera = await app.startWebcam();
@@ -268,10 +273,11 @@ test('webcam recording pauses without joining movements across the gap and finis
   assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
   assert.equal(report.sufficient, true);
   assert.ok(report.payload.metrics.pathLength < 0.15, 'Jump during pause is not counted in traveled distance');
-  assert.equal(app.get('analysis-badge').textContent, '기본 인상 · 규칙 기반');
-  assert.deepEqual(app.get('analysis-qualities').children.map(tag => tag.textContent), report.local.qualities);
+  assert.equal(app.get('analysis-badge').textContent, '해석 대기');
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+  assert.equal(app.get('ai-word').textContent, '해석 대기');
   assert.equal(app.get('analysis-evidence').tagName, 'DETAILS');
-  assert.equal(app.get('analysis-evidence').hidden, false);
+  assert.equal(app.get('analysis-evidence').hidden, true);
   assert.equal(app.get('analysis-evidence').open, false, 'Movement evidence starts collapsed');
   assert.equal(app.calls.length, 0);
   assert.equal(app.get('analyze-button').disabled, false);
@@ -471,7 +477,7 @@ test('synthetic example retains its source and never auto-sends even when automa
   app.get('ai-consent').checked = true;
   await app.click('example');
   assert.equal(app.reports.at(-1).report.payload.source, 'example');
-  assert.equal(app.get('analysis-badge').textContent, '합성 예시 · 기본 인상');
+  assert.equal(app.get('analysis-badge').textContent, '합성 예시 · 해석 대기');
   assert.equal(app.calls.length, 0);
 });
 
@@ -520,15 +526,15 @@ test('a fresh take aborts an in-flight request and ignores its delayed success',
   assert.equal(app.document.body.dataset.view, 'drawing');
   resolve(ok(aiResult));
   await flush();
-  assert.equal(app.get('ai-word').textContent, '기록 전');
-  assert.equal(app.get('analysis-badge').textContent, '기본 인상 · 규칙 기반');
+  assert.equal(app.get('ai-word').textContent, '해석 대기');
+  assert.equal(app.get('analysis-badge').textContent, '해석 대기');
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.get('analysis-evidence').open, false);
   assert.equal(app.get('analysis-evidence').hidden, true);
   assert.equal(app.timers.size, 0, 'Completed stale request clears its timeout');
 });
 
-test('an AI error keeps measured local results and shows the server guidance', async () => {
+test('an AI error shows guidance without presenting local measurements as an interpretation', async () => {
   const app = createApp({ fetchResponse: async () => ({
     ok: false, json: async () => ({ error: { code: 'PROVIDER_QUOTA', message: '무료 사용량 한도에 도달했습니다.' } }),
   }) });
@@ -537,10 +543,12 @@ test('an AI error keeps measured local results and shows the server guidance', a
   record(camera);
   await app.click('finish');
   await flush();
-  assert.equal(app.get('analysis-badge').textContent, '기본 인상 · 규칙 기반');
-  assert.equal(app.get('ai-word').textContent, app.reports.at(-1).report.local.impression);
+  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.equal(app.get('ai-word').textContent, '해석을 받지 못했어요');
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+  assert.equal(app.get('analysis-evidence').hidden, true);
   assert.match(app.get('analysis-status').textContent, /무료 사용량 한도/);
-  assert.match(app.get('analysis-status').textContent, /규칙 기반 기본 인상/);
+  assert.doesNotMatch(app.get('analysis-status').textContent, /규칙|기본 인상/);
   assert.equal(app.get('analyze-button').disabled, false);
 });
 
@@ -737,4 +745,207 @@ test('both hidden hands pause the shared clock; camera failure clears the live c
   assert.equal(new Set(input.points.map(p => p.stroke)).size, 4);
   assert.deepEqual([...new Set(input.poseFrames.map(f => f.segment))],[1,2]);
   assert.equal(report.payload.metrics.pathLength, 0, 'Stationary wrists remain stationary across the hidden gap');
+});
+
+test('Ghosting defaults to disclosed automatic AI and removes every monochrome UI binding', () => {
+  const checkbox = html.match(/<input\b[^>]*id="ai-consent"[^>]*>/)?.[0];
+  assert.match(checkbox, /\bchecked\b/);
+  assert.match(html, /<title>Ghosting/);
+  assert.match(html, /<span>Ghosting<small>/);
+  assert.ok(html.indexOf('feeling-similarity.js') < html.indexOf('src="./app.js'));
+  assert.doesNotMatch(html, /MOVEMENT READING|color-mono|result-color|mono-note|한 가지 색|단색/);
+  assert.doesNotMatch(appSource, /motionReport\.local|analysisKind|colorMode|setColor|result-color|mono-note/);
+  const app = createApp();
+  assert.equal(app.get('width').value, '3', 'Thickness setting remains');
+  assert.ok(app.get('color-scale'), 'Speed color explanation remains');
+});
+
+test('automatic AI opens the progress modal and closes immediately on an early successful response', async () => {
+  let resolve;
+  const response = new Promise(done => { resolve = done; });
+  const app = createApp({ automaticAI:true, fetchResponse:() => response });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  assert.equal(app.get('analysis-dialog').open, true);
+  assert.equal(app.get('analysis-badge').textContent, 'AI 해석 중');
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+  assert.equal(app.calls.length, 1);
+  assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [15000]);
+  resolve(ok(aiResult));
+  await flush();
+  assert.equal(app.get('analysis-dialog').open, false, 'No fixed fifteen-second wait after success');
+  assert.equal(app.get('ai-word').textContent, aiResult.analysis.impression);
+  assert.equal(app.timers.size, 0);
+});
+
+test('fifteen-second deadline closes a stalled fetch and ignores its late response', async () => {
+  let resolve;
+  const response = new Promise(done => { resolve = done; });
+  const app = createApp({ automaticAI:true, fetchResponse:() => response });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  const timeout = [...app.timers.values()].find(timer => timer.delay === 15000);
+  assert.ok(timeout);
+  timeout.callback();
+  await flush();
+  assert.equal(app.calls[0].options.signal.aborted, true);
+  assert.equal(app.get('analysis-dialog').open, false);
+  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.match(app.get('analysis-status').textContent, /15초/);
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+  assert.equal(app.get('analyze-button').disabled, false);
+  assert.equal(app.timers.size, 0);
+  resolve(ok(aiResult));
+  await flush();
+  assert.equal(app.get('ai-word').textContent, '해석을 받지 못했어요');
+});
+
+test('the same deadline covers a stalled response body rather than restarting after headers', async () => {
+  let resolveBody;
+  const body = new Promise(done => { resolveBody = done; });
+  const app = createApp({ automaticAI:true, fetchResponse:async () => ({ok:true,json:() => body}) });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  await flush();
+  assert.equal(app.get('analysis-dialog').open, true);
+  assert.equal(app.timers.size, 1);
+  [...app.timers.values()][0].callback();
+  await flush();
+  assert.equal(app.get('analysis-dialog').open, false);
+  assert.match(app.get('analysis-status').textContent, /15초/);
+  resolveBody(aiResult);
+  await flush();
+  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+});
+
+test('progress dialog cancellation preserves the recording and prevents late AI replacement', async () => {
+  let resolve;
+  const app = createApp({ automaticAI:true, fetchResponse:() => new Promise(done => { resolve = done; }) });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  const count = app.get('point-count').textContent;
+  await app.get('analysis-dialog').dispatch('cancel');
+  await flush();
+  assert.equal(app.get('analysis-dialog').open, false);
+  assert.equal(app.get('result-dialog').open, true);
+  assert.equal(app.get('point-count').textContent, count);
+  assert.match(app.get('analysis-status').textContent, /취소/);
+  assert.equal(app.calls[0].options.signal.aborted, true);
+  resolve(ok(aiResult));
+  await flush();
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+});
+
+test('an unavailable public API remains a plain error without fake impressions or network requests', async () => {
+  const app = createApp({ automaticAI:true, hostname:'yebe9.github.io' });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  await flush();
+  assert.equal(app.calls.length, 0);
+  assert.equal(app.get('analysis-dialog').open, false);
+  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.match(app.get('analysis-status').textContent, /서버가 아직 연결되지/);
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+  assert.equal(app.get('analysis-evidence').hidden, true);
+});
+
+test('insufficient movement explains the missing AI result without sending or showing a local fallback', async () => {
+  const app = createApp({ automaticAI:true });
+  const camera = await app.startHand();
+  camera.emitHands(1000, twoHands());
+  await app.click('finish');
+  assert.equal(app.reports.at(-1).report.sufficient, false);
+  assert.equal(app.calls.length, 0);
+  assert.equal(app.get('analysis-dialog').open, false);
+  assert.equal(app.get('ai-word').textContent, '움직임이 부족해요');
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+  assert.equal(app.get('analyze-button').disabled, true);
+});
+
+test('short intent counts Unicode codepoints and preserves the full pasted text beside existing detail', async () => {
+  const app = createApp();
+  const short = app.get('intent-short');
+  short.value = '🌊💃🖐️✨';
+  await short.dispatch('input');
+  assert.equal(Array.from(short.value).length, 5);
+  assert.equal(app.get('intent-count').textContent, '5 / 5');
+  assert.equal(app.get('intent-detail').value, '');
+  const original = '유연하면서빠른 움직임 전체를 남겨요';
+  app.get('intent-detail').value = '이미 작성한 소중한 메모';
+  short.value = original;
+  await short.dispatch('input', {inputType:'insertFromPaste'});
+  assert.equal(short.value, Array.from(original).slice(0,5).join(''));
+  assert.equal(app.get('intent-detail').value, `이미 작성한 소중한 메모\n${original}`);
+  assert.equal(app.get('intent-count').textContent, '5 / 5');
+  assert.match(app.get('feeling-note').textContent, /원래 표현 전체/);
+});
+
+test('Korean IME composition is not truncated until committed and its complete original is preserved once', async () => {
+  const app = createApp();
+  const short = app.get('intent-short');
+  await short.dispatch('compositionstart');
+  short.value = '가나다라마ㅂ';
+  await short.dispatch('input', {isComposing:true});
+  assert.equal(short.value, '가나다라마ㅂ', 'Never interrupt a syllable under composition');
+  assert.equal(app.get('intent-detail').value, '');
+  short.value = '가나다라마바';
+  await short.dispatch('compositionend');
+  assert.equal(short.value, '가나다라마');
+  assert.equal(app.get('intent-detail').value, '가나다라마바');
+  await short.dispatch('input', {isComposing:false});
+  assert.equal(app.get('intent-detail').value, '가나다라마바', 'The final input event does not duplicate the overflow');
+  assert.equal(app.get('intent-word').textContent, '가나다라마');
+});
+
+test('similarity runs only for a short private intent after a real AI result and uses the supplied lexicon', async () => {
+  const result = copy(aiResult);
+  result.analysis.qualities = ['유연한'];
+  const app = createApp({ fetchResponse:async () => ok(result) });
+  const compared = [];
+  const compare = app.window.GhostingSimilarity.compare;
+  app.window.GhostingSimilarity = { compare(intent, qualities) {
+    compared.push({intent,qualities:copy(qualities)});
+    return compare(intent, qualities);
+  } };
+  await app.click('example');
+  app.get('intent-short').value = '유연한';
+  app.get('intent-detail').value = '절대 보내지 않을 내 사적인 생각';
+  await app.get('intent-short').dispatch('input');
+  assert.equal(compared.length, 0);
+  assert.equal(app.get('comparison-score').hidden, true);
+  await app.click('analyze-button');
+  await flush();
+  assert.ok(compared.length > 0);
+  assert.equal(compared.at(-1).intent, '유연한');
+  assert.deepEqual(compared.at(-1).qualities, result.analysis.qualities);
+  assert.equal(app.get('comparison-score').hidden, false);
+  assert.equal(app.get('similarity-score').textContent, '100%');
+  assert.ok(!app.calls[0].options.body.includes('유연한'));
+  assert.ok(!app.calls[0].options.body.includes('사적인'));
+  app.get('intent-short').value = '처음본표현';
+  await app.get('intent-short').dispatch('input');
+  assert.doesNotMatch(app.get('similarity-score').textContent, /\d|%/);
+  assert.match(app.get('similarity-score').textContent, /찾지 못/);
+  app.get('intent-short').value = '';
+  await app.get('intent-short').dispatch('input');
+  assert.equal(app.get('comparison-score').hidden, true, 'Long detail alone does not create a guessed score');
+});
+
+test('malformed AI qualities do not become an apparent AI interpretation or similarity score', async () => {
+  const malformed = copy(aiResult);
+  malformed.analysis.qualities = [null];
+  const app = createApp({ automaticAI:true, fetchResponse:async () => ok(malformed) });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  await flush();
+  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+  assert.equal(app.get('comparison-score').hidden, true);
+  assert.match(app.get('analysis-status').textContent, /응답 형식/);
 });

@@ -1,4 +1,4 @@
-/* 잔상: WebGL 렌더링 + 시작 → 기록(일시정지) → 결과 상태 흐름. */
+/* Ghosting: WebGL 렌더링 + 시작 → 기록(일시정지) → AI 결과 상태 흐름. */
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
@@ -6,6 +6,7 @@
   const stage = $('stage');
   const dialog = $('start-dialog');
   const resultDialog = $('result-dialog');
+  const analysisDialog = $('analysis-dialog');
   const workspace = $('workspace');
   const LIMIT = 10000;
   let points = []; // { x, y, t, speed, stroke }
@@ -20,10 +21,10 @@
   let stroke = 0;
   let captureAspect = 1;
   let strokeWidth = 3;
-  let colorMode = 'speed';
   let playbackRate = 1;
   let dirty = true;
   let intendedFeeling = '';
+  let intentComposing = false;
   let inputMode = 'hand';
   let captureSource = 'hand';
   let handTarget = 'indexTip';
@@ -38,7 +39,7 @@
   let poseSegment = 0;
   let jointTracks = new Map();
   let analysis = null;
-  let analysisKind = 'local';
+  let analysisState = 'idle';
   let motionReport = null;
   let analysisMessage = '';
   let analysisBusy = false;
@@ -58,7 +59,6 @@
   }
   // 속도 기준은 화면 높이/초. 창 크기 대신 동작의 상대적 빠르기를 표현한다.
   function speedColor(speed) {
-    if (colorMode === 'mono') return [.64,.86,.81];
     const value = clamp(speed / 1.7, 0, 1) * (palette.length - 1);
     const low = Math.min(palette.length - 2, Math.floor(value));
     const f = value - low;
@@ -231,6 +231,8 @@
 
   function resetFeelings() {
     intendedFeeling = '';
+    intentComposing = false;
+    $('intent-short').value = '';
     $('intent-detail').value = '';
     document.querySelectorAll('.feelings button').forEach(b=>b.setAttribute('aria-pressed','false'));
     updateComparison();
@@ -238,18 +240,22 @@
 
   function updateComparison() {
     const detail = $('intent-detail').value.trim();
+    $('intent-count').textContent = `${Array.from($('intent-short').value).length} / 5`;
     $('intent-word').textContent = intendedFeeling || (detail ? '나만의 표현' : '선택 전');
     $('intent-summary').textContent = detail || (intendedFeeling ? '내가 이 움직임으로 표현하려던 느낌입니다.' : '표현하려던 느낌을 위에서 남겨주세요.');
-    $('feeling-note').textContent = intendedFeeling || detail ? '의도를 남겼어요. 서버로 보내지 않고 이 화면에만 보관합니다.' : '단어를 고르거나 직접 적어주세요. 이 화면에만 남습니다.';
-    const ai = analysisKind === 'ai';
-    $('analysis-badge').textContent = analysisBusy ? 'AI 해석 중' : ai ? 'Gemini 해석' : isExample ? '합성 예시 · 기본 인상' : '기본 인상 · 규칙 기반';
-    $('reading-label').textContent = ai ? '02 / AI READING' : '02 / MOVEMENT READING';
-    $('reading-title').textContent = ai ? 'AI가 느낀 움직임' : '움직임에서 읽힌 인상';
-    $('ai-word').textContent = analysis?.impression || '기록 전';
+    $('feeling-note').textContent = intendedFeeling || detail ? '의도를 남겼어요. 서버로 보내지 않고 이 화면에만 보관합니다.' : '직접 적거나 표현을 골라주세요. 이 화면에만 남습니다.';
+    const ai = Boolean(analysis);
+    $('analysis-badge').textContent = analysisBusy ? 'AI 해석 중' : ai ? 'Gemini 해석'
+      : analysisState === 'error' ? '해석 불가' : isExample ? '합성 예시 · 해석 대기' : '해석 대기';
+    $('reading-label').textContent = '02 / AI READING';
+    $('reading-title').textContent = 'AI가 느낀 움직임';
+    $('ai-word').textContent = analysis?.impression || (analysisBusy ? '해석 중'
+      : analysisState === 'error' ? '해석을 받지 못했어요' : analysisState === 'insufficient' ? '움직임이 부족해요' : '해석 대기');
     $('analysis-qualities').replaceChildren(...(analysis?.qualities || []).slice(0,4).map(text => {
       const tag = document.createElement('span'); tag.textContent = text; return tag;
     }));
-    $('ai-summary').textContent = analysis?.description || '움직임을 남기면 분석이 시작됩니다.';
+    $('ai-summary').textContent = analysis?.description || (analysisBusy
+      ? 'AI가 움직임에서 전해지는 인상을 읽고 있습니다.' : '아직 AI가 생성한 결과가 없습니다.');
     $('analysis-status').textContent = analysisMessage;
     $('analysis-evidence').hidden = !analysis;
     $('analysis-observations').replaceChildren(...(analysis?.observations || []).map(text => {
@@ -262,11 +268,42 @@
     if (!intendedFeeling && !detail) {
       $('comparison-verdict').textContent = '내 의도를 먼저 남겨보세요.';
       $('comparison-explanation').textContent = '해석과 내 의도를 비교해보세요. 같은 움직임의 어떤 부분을 서로 다르게 읽었을까요?';
-    } else {
+    } else if (ai) {
       $('comparison-verdict').textContent = '내가 담은 느낌과 읽힌 인상';
       $('comparison-explanation').textContent = '나는 ‘' + (intendedFeeling || detail) + '’을 담았고, ' +
-        (ai ? 'AI는' : '기본 해석은') + ' ‘' + (analysis?.impression || '분석 대기') +
+        'AI는 ‘' + analysis.impression +
         '’을 보여줍니다. 움직임에서 읽은 근거와 내 의도 사이에 어떤 차이가 있나요?';
+    } else {
+      $('comparison-verdict').textContent = '내 의도를 남겼어요.';
+      $('comparison-explanation').textContent = 'AI 해석이 도착하면 내 표현과 나란히 비교할 수 있어요.';
+    }
+    $('comparison-score').hidden = !ai || !intendedFeeling;
+    if (ai && intendedFeeling) {
+      const similarity = window.GhostingSimilarity?.compare(intendedFeeling, analysis.qualities || []);
+      $('similarity-score').textContent = Number.isFinite(similarity?.score)
+        ? `${Math.round(clamp(similarity.score, 0, 100))}%` : '비교할 표현을 찾지 못했어요';
+      $('similarity-reason').textContent = similarity?.reason || '이 표현의 의미를 비교할 자료가 아직 부족합니다.';
+    } else {
+      $('similarity-score').textContent = '';
+      $('similarity-reason').textContent = '';
+    }
+  }
+
+  function commitIntent() {
+    if (intentComposing) return;
+    const original = $('intent-short').value;
+    const characters = Array.from(original);
+    if (characters.length > 5) {
+      const existing = $('intent-detail').value;
+      $('intent-detail').value = existing ? `${existing}\n${original}` : original;
+      $('intent-short').value = characters.slice(0, 5).join('');
+    }
+    intendedFeeling = $('intent-short').value.trim();
+    document.querySelectorAll('.feelings button').forEach(button =>
+      button.setAttribute('aria-pressed', String(button.dataset.feeling === intendedFeeling)));
+    updateComparison();
+    if (characters.length > 5) {
+      $('feeling-note').textContent = '다섯 글자까지 담고, 원래 표현 전체는 아래 메모에 함께 보관했어요.';
     }
   }
 
@@ -277,17 +314,19 @@
     analysisBusy = false;
     analysis = null;
     motionReport = null;
-    analysisKind = 'local';
+    analysisState = 'idle';
     analysisMessage = '';
     $('analysis-evidence').open = false;
+    if (analysisDialog.open) analysisDialog.close();
   }
 
   function analyzeMovement() {
     motionReport = window.JansangMotion.analyze({source:captureSource, handTarget, points, poseFrames, durationMs:duration, captureAspect});
-    analysis = motionReport.local;
-    analysisKind = 'local';
+    analysis = null;
+    analysisState = motionReport.sufficient ? 'idle' : 'insufficient';
     analysisMessage = motionReport.sufficient
-      ? '움직임의 특징을 표현어로 바꾼 기본 인상입니다. AI 해석을 누르면 더 풍부한 감상을 볼 수 있어요.'
+      ? (isExample ? '합성 예시입니다. 해석 버튼을 누르면 이 예시의 좌표를 AI에 보냅니다.'
+        : 'AI 해석을 요청하면 움직임에서 전해지는 인상을 볼 수 있어요.')
       : '분석할 움직임이 짧거나 인식한 관절이 부족합니다. 1초 이상 움직임을 남겨주세요.';
     updateComparison();
     if ($('ai-consent').checked && motionReport.sufficient && !isExample) requestAI();
@@ -301,7 +340,21 @@
       return configured;
     }
     if (['localhost','127.0.0.1','[::1]'].includes(location.hostname)) return '';
-    throw new Error('AI 서버가 아직 연결되지 않았습니다. 현재는 규칙 기반 기본 인상을 볼 수 있어요. Gemini 키와 서버 연결 후 AI 해석이 켜집니다.');
+    throw new Error('AI 서버가 아직 연결되지 않았습니다. Gemini 키와 서버를 연결한 뒤 다시 시도해 주세요.');
+  }
+
+  // Covers the entire request, including reading its body, even if a stalled
+  // transport does not settle its own promise promptly after abort.
+  function abortable(promise, signal) {
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        const error = new Error('Analysis cancelled'); error.name = 'AbortError';
+        reject(error);
+      };
+      if (signal.aborted) { abort(); return; }
+      signal.addEventListener('abort', abort, { once:true });
+      Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    });
   }
 
   async function requestAI() {
@@ -309,44 +362,45 @@
     const id = takeId;
     const controller = new AbortController();
     analysisController = controller;
-    const timeout = setTimeout(() => controller.abort(), 95000);
-    const waitingNotice = setTimeout(() => {
-      if (id !== takeId || !analysisBusy) return;
-      analysisMessage = 'Gemini가 움직임을 해석하고 있어요. 최대 90초 정도 걸릴 수 있습니다. 기다리는 동안 기본 분석과 잔상을 살펴보세요.';
-      updateComparison();
-    }, 12000);
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 15000);
     analysisBusy = true;
+    analysis = null;
+    analysisState = 'busy';
     analysisMessage = '움직임 좌표를 바탕으로 인상을 읽고 있어요. 영상과 내 의도는 보내지 않습니다.';
     updateComparison();
+    if (!analysisDialog.open) analysisDialog.showModal();
     try {
       const base = apiBase();
-      const response = await fetch(base + '/api/analyze', {
+      const response = await abortable(fetch(base + '/api/analyze', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify(motionReport.payload), signal:controller.signal, credentials:'omit'
-      });
-      const data = await response.json().catch(() => null);
+      }), controller.signal);
+      const data = await abortable(response.json().catch(() => null), controller.signal);
       if (!response.ok) throw new Error(data?.error?.message || 'AI 서버에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.');
       const result = data?.analysis;
       if (!result || typeof result.impression !== 'string' || typeof result.description !== 'string' ||
           !Array.isArray(result.observations) || !result.observations.every(x=>typeof x==='string') ||
+          !Array.isArray(result.qualities) || !result.qualities.length ||
+          !result.qualities.every(x=>typeof x==='string' && x.trim()) ||
           typeof result.caveat !== 'string') throw new Error('AI 응답 형식을 확인할 수 없습니다. 다시 시도해주세요.');
-      if (id !== takeId) return;
+      if (id !== takeId || analysisController !== controller || controller.signal.aborted) return;
       analysis = result;
-      analysisKind = 'ai';
+      analysisState = 'ready';
       analysisMessage = (isExample ? '합성 예시 움직임에 대한 ' : '') + 'Gemini가 움직임 정보만 보고 생성한 해석입니다.';
       announce('AI 해석이 도착했습니다. 내 의도와 비교해보세요.');
     } catch (error) {
-      if (id !== takeId) return;
-      analysisMessage = (error.name === 'AbortError'
-        ? 'AI 응답 시간이 길어져 요청을 멈췄습니다. 다시 시도할 수 있어요.'
-        : error instanceof TypeError ? 'AI 서버에 연결하지 못했습니다. 인터넷 연결과 서버 설정을 확인해주세요.' : error.message) +
-        (analysisKind === 'ai' ? ' 앞서 받은 해석을 유지합니다.' : ' 아래 결과는 규칙 기반 기본 인상입니다.');
+      if (id !== takeId || analysisController !== controller) return;
+      analysisState = 'error';
+      analysisMessage = error.name === 'AbortError'
+        ? (timedOut ? '15초 안에 AI 응답을 받지 못해 요청을 멈췄어요. 다시 시도할 수 있습니다.' : 'AI 해석을 취소했어요. 잔상은 그대로 남아 있습니다.')
+        : error instanceof TypeError ? 'AI 서버에 연결하지 못했습니다. 인터넷 연결과 서버 설정을 확인해주세요.' : error.message;
     } finally {
       clearTimeout(timeout);
-      clearTimeout(waitingNotice);
-      if (id === takeId) {
+      if (id === takeId && analysisController === controller) {
         analysisBusy = false;
         analysisController = null;
+        if (analysisDialog.open) analysisDialog.close();
         updateComparison();
       }
     }
@@ -433,6 +487,10 @@
   }
 
   function openStart() {
+    if (analysisBusy) {
+      analysisController?.abort();
+      if (analysisDialog.open) analysisDialog.close();
+    }
     if(view === 'result' && mode === 'playing') togglePlayback();
     if(!dialog.open) dialog.showModal();
     refresh();
@@ -656,7 +714,7 @@
     setView('result');
     $('result-duration').textContent=(duration/1000).toFixed(1);
     $('result-strokes').textContent=new Set(points.map(p=>p.stroke)).size;
-    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.'
+    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하며 움직임의 흐름을 살펴보세요.'
       : captureSource === 'hand' ? `보이는 각 손의 ${handTargetLabel()}이 남긴 잔상입니다. 손마다 자취를 나눠 기록했어요.`
       : '양손·양발·몸의 중심이 남긴 잔상입니다. 얼굴 좌표와 영상은 기록하지 않았어요.';
     openResult();
@@ -717,16 +775,6 @@
     $('settings-close').focus();
   }
 
-  function setColor(type) {
-    colorMode=type;
-    for(const prefix of ['color-','result-color-']) for(const other of ['speed','mono']) {
-      $(prefix+other).setAttribute('aria-pressed',String(type===other));
-    }
-    $('color-scale').hidden=type==='mono';
-    $('mono-note').hidden=type!=='mono';
-    dirty=true;render();
-  }
-
   function togglePlayback() {
     if(lost || view!=='result' || !points.length) return;
     if(mode==='playing') {
@@ -765,6 +813,8 @@
   $('result-close').addEventListener('click',()=>closeResult());
   $('reopen-result').addEventListener('click',openResult);
   resultDialog.addEventListener('cancel',event=>{ event.preventDefault();closeResult(); });
+  $('analysis-cancel').addEventListener('click',()=>analysisController?.abort());
+  analysisDialog.addEventListener('cancel',event=>{ event.preventDefault();analysisController?.abort(); });
   $('dialog-close').addEventListener('click',()=>dialog.close());
   $('start').addEventListener('click',startDrawing);
   $('input-hand').addEventListener('click',()=>setInputMode('hand'));
@@ -818,16 +868,17 @@
     strokeWidth=Number(event.target.value);$('width-value').textContent=strokeWidth;dirty=true;render();
   });
   $('show-grid').addEventListener('change',event=>{ $('grid').hidden=!event.target.checked; });
-  for(const prefix of ['color-','result-color-']) for(const type of ['speed','mono']) {
-    $(prefix+type).addEventListener('click',()=>setColor(type));
-  }
   document.querySelectorAll('.feelings button').forEach(button=>button.addEventListener('click',()=>{
     const selected=button.getAttribute('aria-pressed')==='true';
     document.querySelectorAll('.feelings button').forEach(b=>b.setAttribute('aria-pressed','false'));
     button.setAttribute('aria-pressed',String(!selected));
     intendedFeeling = selected ? '' : button.dataset.feeling;
+    $('intent-short').value = intendedFeeling;
     updateComparison();
   }));
+  $('intent-short').addEventListener('compositionstart',()=>{ intentComposing = true; });
+  $('intent-short').addEventListener('compositionend',()=>{ intentComposing = false; commitIntent(); });
+  $('intent-short').addEventListener('input',event=>{ if (!event.isComposing) commitIntent(); });
   $('intent-detail').addEventListener('input',updateComparison);
   $('analyze-button').addEventListener('click',requestAI);
   $('export').addEventListener('click',()=>{
@@ -836,7 +887,7 @@
     canvas.toBlob(blob=>{
       if(!blob) { announce('이미지 저장에 실패했습니다. 다시 시도해 주세요.');return; }
       const url=URL.createObjectURL(blob);
-      const link=document.createElement('a');link.href=url;link.download='jansang-'+Date.now()+'.png';link.click();
+      const link=document.createElement('a');link.href=url;link.download='ghosting-'+Date.now()+'.png';link.click();
       setTimeout(()=>URL.revokeObjectURL(url),10000);
       announce('잔상 PNG를 저장했습니다.');
     },'image/png');
@@ -845,7 +896,7 @@
   // 팝업은 native dialog가 포커스를 가두고 Escape 닫기를 처리한다.
   // 설정 메뉴는 Escape로 닫고, 기록/결과 단축키는 각각 해당 화면에서만 동작한다.
   document.addEventListener('keydown',event=>{
-    if(dialog.open || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+    if(dialog.open || analysisDialog.open || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
     if(event.code==='Escape' && !$('settings').hidden) { event.preventDefault();closeSettings();return; }
     if(/^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(event.target.tagName) || event.target.isContentEditable) return;
     if(event.code==='Space') {
@@ -899,7 +950,7 @@
       cursor=Math.min(duration,cursor+(now-lastFrame)*playbackRate);dirty=true;
       if(cursor>=duration) {
         mode='complete';
-        $('result-caption').textContent='재생을 마쳤어요. 색을 바꾸면 같은 움직임이 어떻게 느껴지나요?';
+        $('result-caption').textContent='재생을 마쳤어요. 같은 움직임에서 어떤 느낌이 전해지나요?';
         announce('재생을 마쳤습니다.');
       }
       refresh();

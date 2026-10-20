@@ -1,8 +1,14 @@
 // Shared by the local Node server and the optional Cloudflare Worker.
 // Only numeric movement data crosses this boundary. No video or intention text.
-export const DEFAULT_MODEL = 'gemini-3.8-flash';
+import { DANCE_VOCABULARY } from './dance-vocabulary.mjs';
+export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 export const MAX_BODY_BYTES = 100 * 1024;
+export const ANALYSIS_DEADLINE_MS = 13000;
 const MAX_FRAMES = 80;
+const PROVIDER_FRAME_LIMIT = 24;
+const DANCE_LABELS = DANCE_VOCABULARY.map(item => item.label);
+const LABEL_SET = new Set(DANCE_LABELS);
+const HAND_SUMMARY_JOINTS = ['wrist', 'indexMcp', 'thumbTip', 'indexTip', 'middleTip', 'ringTip', 'pinkyTip'];
 const JOINTS = new Set([
   'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow',
   'leftWrist', 'rightWrist', 'leftPinky', 'rightPinky',
@@ -28,55 +34,30 @@ const METRICS = new Set([
 const OUTPUT_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    impression: { type: 'STRING', description: '유연한, 빠른, 경쾌한, 초조한 등의 대표 인상 형용사 하나, 한국어 2~10자' },
-    description: { type: 'STRING', description: '움직임이 주는 분위기와 리듬을 감상하듯 설명하는 한국어 두 문장. 숫자나 기술 용어 금지' },
-    observations: { type: 'ARRAY', items: { type: 'STRING', description: '인상을 뒷받침하는 눈에 보이는 움직임. 숫자와 지표명 대신 일상적인 한국어로 표현' }, minItems: 1, maxItems: 4 },
-    qualities: { type: 'ARRAY', items: { type: 'STRING', description: '짧은 인상 형용사. 예: 유연한, 빠른, 초조한' }, minItems: 3, maxItems: 3 },
-    caveat: { type: 'STRING', description: '실제 감정의 판정이 아니며 데이터의 한계를 설명하는 한국어 한 문장' },
+    impression: { type: 'STRING', enum: DANCE_LABELS, description: '제공된 50개 표현 중 대표 인상 하나' },
+    description: { type: 'STRING', description: '한국어 감상 두 문장, 합계 140자 이내. 숫자나 기술 용어 금지' },
+    observations: { type: 'ARRAY', items: { type: 'STRING', description: '관측 근거를 일상 언어로 짧게, 40자 이내' }, minItems: 1, maxItems: 2 },
+    qualities: { type: 'ARRAY', items: { type: 'STRING', enum: DANCE_LABELS }, minItems: 3, maxItems: 3 },
   },
-  required: ['impression', 'description', 'observations', 'qualities', 'caveat'],
+  required: ['impression', 'description', 'observations', 'qualities'],
 };
 
-const SYSTEM_PROMPT = `너는 미디어아트 작품 '잔상'의 움직임 감상 도우미다.
-오직 제공된 숫자 좌표와 측정값을 보고 춤과 움직임이 관객에게 줄 수 있는 시각적 인상을 한국어로 묘사한다.
-주인공은 객관적인 사실의 나열이 아니라 움직임에서 느껴지는 질감, 리듬, 분위기다.
-대표 표현은 반드시 "유연한", "빠른", "경쾌한", "차분한", "날카로운", "머뭇거리는", "초조한" 같은 짧은 형용사 하나로 쓴다.
-관측 근거에 맞는 표현을 자유롭게 고르되 특정 단어를 반드시 사용할 필요는 없다.
-원본 영상, 얼굴, 음성은 제공되지 않는다. 실제 감정, 정신 상태, 의도, 성격, 건강, 정체성이나 인구통계는 추론하지 않는다.
-"초조한"은 짧고 급한 반복이나 멈칫하는 리듬이 만드는 장면의 인상으로 사용할 수 있다.
-"이 사람은 초조하다", "불안한 성격이다"처럼 마음 상태를 단정하지 말고 "초조한 장면의 표현처럼 읽힐 수 있다"처럼 움직임 표현으로만 서술한다.
-description은 감상하듯 자연스러운 두 문장으로 쓴다. "평균 속도 0.3", "방향 전환율", "정지 비율" 같은 숫자나 지표명은 description과 observations에 절대 나열하지 않는다.
-예를 들어 "잔잔하게 이어지는 팔의 흐름에 가벼운 스텝이 더해져 유연하고 경쾌한 인상을 줍니다. 짧게 머무는 순간이 다음 움직임을 기대하게 합니다."와 같은 방식이다. 이 예시의 동작을 데이터에 없는 채로 복사하지 않는다.
-지표만으로 확신을 만들지 말고 좌표에서 확인되는 속도 변화, 멈춤, 방향 전환, 공간 사용, 양팔·다리·몸통의 관계 중 실제 근거가 있는 것만 연결한다.
-아래에서 "웹캠"이라고 설명하는 전신 지표와 관절은 source가 webcam일 때만 적용된다.
-source가 webcam이면 얼굴을 제외한 어깨, 팔꿈치, 손목, 손끝, 골반, 무릎, 발목, 뒤꿈치, 발끝이 최대 22개 제공된다.
-없는 관절이나 가려진 신체 부위의 움직임을 상상하지 않는다. 발이 관측되면 스텝과 다리 리듬도 읽고, 손목만 보고 전신 춤의 인상을 대신하지 않는다.
-정규화 좌표는 왼쪽 위 (0,0), 오른쪽 아래 (1,1), t와 durationMs는 밀리초다. 웹캠 좌표는 거울처럼 반전된 화면 좌표다.
-meanSpeed와 peakSpeed는 화면 대각선 길이를 1로 둔 초당 거리, pathLength는 화면 대각선 길이를 1로 둔 이동 거리다.
-웹캠 meanSpeed와 pathLength는 매 순간 가장 활발한 상체·하체·몸통 부위의 움직임을 따른다. 움직이지 않는 팔 때문에 스텝이 묻히지 않도록 한 휴리스틱이다.
-upperBodySpeed는 관측된 양손목·양팔꿈치·양어깨 쌍 중 가장 활발한 쌍의 평균 이동 속도다.
-lowerBodySpeed는 관측된 양발목·양무릎·양골반 쌍 중 가장 활발한 쌍의 평균 이동 속도다. 두 지표 모두 매 순간 활발한 쌍을 선택한 뒤 시간 평균을 낸 값이다.
-torsoSpeed는 관측된 어깨·골반의 평균 이동 속도다. 해당 관절 관측이 없을 때도 0이므로, 값 0만으로 정지했다고 단정하지 않는다.
-stillnessRatio는 관측 시간 중 느린 움직임 비율, coverage는 궤적이 사용한 정규화 경계 상자 면적이다.
-웹캠 coverage는 각 관절이 연속 구간에서 실제 이동한 범위 중 최대 면적이며, 서 있는 몸이 차지하는 면적이 아니다.
-spread는 화면 대각선 길이를 1로 둔 관측 관절 간 퍼짐이다. 큰 spread만으로 역동적인 춤이라 부르지 않는다.
-tempoVariation은 속도의 표준편차/평균, directionChangeRate는 초당 방향 전환 횟수다.
-trackedDurationMs는 유효하게 추적한 시간, validFrameRatio는 유효 관측 비율, fullBodyRatio는 양어깨·골반·무릎·발목을 모두 관측한 프레임 비율이다.
-fullBodyRatio가 낮으면 보이는 부분만으로 읽었다고 짧게 밝힌다. 모든 지표는 휴리스틱이며 정확한 신체량이 아니다.
-source가 webcam 또는 hand인 sample의 segment가 바뀌면 일시정지 또는 추적 손실 후 새 기록 구간이다. t는 정지 시간을 제외하므로 다른 segment 사이를 연결하거나 그 사이의 속도·방향을 추정하지 않는다.
-source가 hand이면 웹캠으로 한 손 또는 두 손을 관측한 기록이다. 각 sample의 hands 배열에는 실제로 보인 손만 최대 두 개 들어 있고, 손마다 id와 최대 21개 joints가 있다. 손목과 다섯 손가락 이외의 신체는 제공되지 않으므로 팔, 다리, 머리, 몸통, 전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다.
-손 id는 이어지는 추적 구간을 구별하는 번호이며 해부학적 왼손·오른손을 뜻하지 않는다. 좌우 손이라고 단정하지 말고 한 손, 두 손, 손 1의 자취처럼 표현한다. id가 달라지거나 어느 프레임에서 사라진 손의 자취를 다른 손 또는 재등장한 손에 연결하지 않는다. 같은 id여도 segment가 바뀌거나 큰 시간 공백이 있으면 연결하지 않는다.
-두 손의 나란한 흐름, 반대 방향 움직임, 가까워짐·멀어짐, 리듬의 대비는 두 손이 동시에 보인 연속 구간에서만 근거를 찾는다. 한 손씩 번갈아 관측된 기록으로 두 손의 협응을 상상하지 않는다.
-handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목의 궤적을 우선 감상한다. hand의 meanSpeed, peakSpeed, stillnessRatio, coverage, spread, tempoVariation, directionChangeRate, pathLength, trackedDurationMs는 오직 각 손의 선택한 자취에서 계산한 값이다.
-hand의 meanSpeed, pathLength, directionChangeRate는 같은 연속 시간 구간에서 관측된 각 손의 선택 지점 이동을 평균한 값이다. peakSpeed는 가장 빠른 손의 순간 속도이며, trackedDurationMs는 손이 둘이어도 같은 시간 구간을 두 번 세지 않는다. 한 손이 가만히 있고 다른 손이 움직이는 경우 평균 지표만으로 두 손이 모두 정지했다고 판단하지 않는다.
-hand의 coverage와 spread는 선택한 자취가 연속해서 움직인 범위이며 손 자체의 크기나 손가락 간 벌어짐이 아니다. 다른 손가락의 움직임은 실제 관절 좌표에서 관측되는 경우에만 보조 근거로 쓴다. 손목이 가만히 있어도 검지 끝은 움직일 수 있으며 그 반대도 가능하다.
-hand의 validFrameRatio는 선택한 지점을 포함하여 손 관절이 인식된 프레임 비율이다. 전신 관절이나 fullBodyRatio가 없다는 이유로 손 기록을 불충분하다고 판단하지 않는다. "검지 끝이 완만하게 이어져 유연한 자취를 남깁니다."처럼 실제 선택한 손의 자취를 설명한다.
-source가 pointer이면 손으로 그린 선만 관측한 것이므로 신체 자세나 춤을 보았다고 쓰지 않는다.
-source가 example이면 사람이 한 움직임이 아니라 합성 예시임을 description에 밝힌다.
-샘플 간 큰 시간 간격, 추적 손실, 짧은 기록은 해석의 불확실성으로 설명한다.
-impression은 짧은 대표 형용사 하나, description은 두 문장, observations는 일상 언어로 쓴 근거 1~4개, qualities는 서로 다른 짧은 형용사 정확히 3개다.
-caveat에는 "실제 감정이나 의도를 판정한 결과가 아닙니다."를 포함한다. 점수, 정확도, 진단, 사용자 의도와의 일치율은 만들지 않는다.
-명시된 JSON 스키마의 속성만 반환한다.`;
+const SYSTEM_PROMPT = `너는 미디어아트 '잔상(Ghosting)'의 움직임 감상 도우미다. 숫자 좌표를 보고 시각적 질감·리듬·분위기를 한국어로 감상한다.
+대표 impression과 qualities는 아래 50개 표현의 정확한 표기만 사용한다. qualities는 서로 다른 세 표현이며 첫 항목은 impression이다.
+description은 짧은 두 문장, observations는 짧은 근거 1~2개다. 숫자나 지표명은 description과 observations에 절대 나열하지 않는다. JSON만 반환한다.
+원본 영상·얼굴·음성·사용자 의도는 제공되지 않는다. 실제 감정·정신 상태·의도·성격·건강·정체성·인구통계는 추론하지 않는다. 감정 관련 표현은 장면의 비유적 인상일 뿐이다. 어휘 풀이에 나와도 음악과 박자의 일치, 실제 근력·기술·완벽함·속마음을 확인했다고 쓰지 않는다. 점수·정확도·일치율·진단도 금지한다.
+좌표는 좌상단(0,0), 우하단(1,1), 웹캠은 거울 화면, t/durationMs는 ms다. 실제 관측을 요약한 최대 24프레임이며 없는 관절·가려진 동작을 상상하지 않는다.
+다른 segment 사이를 연결하거나 속도·방향을 추정하지 않는다. breakBefore:true도 앞 샘플과 단절이다. t는 일시정지 시간을 뺀 값이며 큰 시간 공백도 연결하지 않는다.
+source가 webcam이면 얼굴을 제외한 전신 최대22관절이다. 발이 보일 때 스텝과 다리 리듬도 읽는다. fullBodyRatio가 낮으면 보인 부위만 감상한다.
+source가 hand이면 웹캠으로 한 손 또는 두 손을 관측한 기록이다. hands 배열의 각 id/joints는 그 순간 보인 손이다. 손목과 손가락만 제공되므로 전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다.
+손 id는 해부학적 왼손·오른손을 뜻하지 않는다. ID가 바뀌거나 손이 사라지면 자취를 잇지 않는다. 손별 breakBefore:true도 단절이다. 두 손의 나란함·반대 방향·가까워짐·리듬 대비는 두 손이 동시에 보인 연속 구간에서만 읽는다. 한 손씩 번갈아 관측된 기록으로 두 손의 협응을 상상하지 않는다.
+두 손이 교차했다고 쓰려면 선택 지점들의 상대 위치가 실제로 교차한 근거가 있어야 한다. 회전도 연속 좌표의 명확한 근거 없이 만들지 않는다. 화면의 겹침만으로 실제 접촉을 단정할 수 없다. 누락된 구간을 채워 전체 모양·교차·접촉·회전을 상상하지 않는다.
+handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목을 우선 감상한다. hand joints는 손목·검지관절·다섯 손끝 중 실제 관측된 점만 요약했다. 전신 관절이나 fullBodyRatio가 없다는 이유로 손 기록을 불충분하다고 판단하지 않는다.
+source가 pointer이면 선의 궤적만 보았으며 신체·춤을 보았다고 쓰지 않는다. source가 example이면 합성 예시임을 description에 밝힌다.
+지표는 휴리스틱이다. meanSpeed/peakSpeed는 화면 대각선 길이를 1로 둔 초당 거리, pathLength는 이동거리다. webcam은 가장 활발한 상체/하체/몸통을, hand는 같은 구간에서 추적된 각 손의 선택지점 평균을 따른다. peakSpeed는 가장 빠른 점이며 trackedDurationMs는 같은 시간 구간을 두 번 세지 않는다. 한 손만 움직여도 전체 평균만으로 모두 정지했다고 하지 않는다.
+stillnessRatio=느린 시간비율, coverage=각 점이 연속 구간에서 이동한 최대 면적, spread=몸 관절의 퍼짐 또는 선택한 손 자취의 범위, tempoVariation=속도 변화, directionChangeRate=방향 전환, validFrameRatio=인식 비율이다. 큰 몸/손 자체를 역동성으로 착각하지 않는다. 누락·짧은 기록에는 확신을 낮춘다.
+표현과 뜻(어휘의 비유만 참고하며 실제 사람에 대한 단정은 금지):
+${DANCE_VOCABULARY.map(item => item.label + ': ' + item.description).join('\n')}`;
 
 class ApiError extends Error {
   constructor(status, code, message) {
@@ -155,7 +136,89 @@ export function validateMotion(value) {
   return result;
 }
 
-async function readBoundedJson(request) {
+// Keep actual observations together in time. Never interpolate or flatten the
+// two hands into one path. Important boundaries are preferred over smooth spans.
+export function compactMotion(motion) {
+  const frames = motion.samples;
+  const signature = frame => motion.source === 'hand'
+    ? `${frame.segment ?? 0}:${frame.hands.map(hand => hand.id).sort((a, b) => a - b).join(',')}`
+    : motion.source === 'webcam' ? `${frame.segment ?? 0}:${Object.keys(frame.joints).sort().join(',')}` : frame.stroke;
+  const boundary = (a, b) => signature(a) !== signature(b) || b.t - a.t > 250;
+  const important = new Set([0, frames.length - 1]);
+  for (let i = 1; i < frames.length; i++) {
+    if (boundary(frames[i - 1], frames[i])) { important.add(i - 1); important.add(i); }
+  }
+  let selected = [...important].sort((a, b) => a - b);
+  if (selected.length > PROVIDER_FRAME_LIMIT) {
+    selected = Array.from({ length: PROVIDER_FRAME_LIMIT }, (_, i) =>
+      selected[Math.round(i * (selected.length - 1) / (PROVIDER_FRAME_LIMIT - 1))]);
+  }
+  while (selected.length < Math.min(PROVIDER_FRAME_LIMIT, frames.length)) {
+    let best = -1;
+    let gap = -1;
+    for (let i = 1; i < selected.length; i++) {
+      if (selected[i] - selected[i - 1] < 2) continue;
+      const span = frames[selected[i]].t - frames[selected[i - 1]].t || selected[i] - selected[i - 1];
+      if (span > gap) { best = i; gap = span; }
+    }
+    if (best < 0) break;
+    selected.splice(best, 0, Math.floor((selected[best - 1] + selected[best]) / 2));
+  }
+  const round = value => Math.round(value * 1000) / 1000;
+  const joints = (value, names = Object.keys(value)) => Object.fromEntries(names
+    .filter(name => Object.hasOwn(value, name)).map(name => [name, value[name].map(round)]));
+  const samples = selected.map((index, selectedIndex) => {
+    const frame = frames[index];
+    const previousIndex = selectedIndex ? selected[selectedIndex - 1] : null;
+    const between = previousIndex === null ? [] : frames.slice(previousIndex, index + 1);
+    const broken = between.some((item, i) => i > 0 && (
+      item.t - between[i - 1].t > 250 ||
+      (motion.source === 'pointer' || motion.source === 'example'
+        ? item.stroke !== between[i - 1].stroke : item.segment !== between[i - 1].segment) ||
+      (motion.source === 'webcam' && signature(item) !== signature(between[i - 1]))
+    ));
+    const base = { t: Math.min(motion.durationMs, round(frame.t)) };
+    if (broken) base.breakBefore = true;
+    if (motion.source === 'hand') {
+      return {
+        ...base, segment: frame.segment ?? 0,
+        hands: frame.hands.map(hand => ({
+          id: hand.id,
+          joints: joints(hand.joints, HAND_SUMMARY_JOINTS),
+          ...(between.some(item => !item.hands.some(other => other.id === hand.id)) ? { breakBefore: true } : {})
+        }))
+      };
+    }
+    if (motion.source === 'webcam') return { ...base, segment: frame.segment ?? 0, joints: joints(frame.joints) };
+    return { ...base, x: round(frame.x), y: round(frame.y), stroke: frame.stroke };
+  });
+  return { ...motion, metrics: Object.fromEntries(Object.entries(motion.metrics).map(([key, value]) => [key, round(value)])), samples };
+}
+
+const timedOut = () => new ApiError(504, 'AI_TIMEOUT', 'AI가 제한 시간 안에 해석을 마치지 못했습니다. 잠시 후 다시 시도해 주세요.');
+function assertActive(signal) {
+  if (signal.aborted) throw timedOut();
+}
+
+async function withDeadline(operation, requestedMs) {
+  const timeoutMs = Number.isFinite(requestedMs)
+    ? Math.min(ANALYSIS_DEADLINE_MS, Math.max(1, requestedMs)) : ANALYSIS_DEADLINE_MS;
+  const controller = new AbortController();
+  let timer;
+  const expiry = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      // Race resolves even if a transport ignores AbortSignal or stalls after
+      // headers. Reject before aborting so cleanup cannot mask the timeout.
+      reject(timedOut());
+      controller.abort();
+    }, timeoutMs);
+  });
+  try { return await Promise.race([Promise.resolve().then(() => operation(controller.signal)), expiry]); }
+  finally { clearTimeout(timer); }
+}
+
+async function readBoundedJson(request, signal) {
+  assertActive(signal);
   if (!/^application\/json(?:;|$)/i.test(request.headers.get('content-type') || '')) {
     throw new ApiError(415, 'JSON_REQUIRED', 'application/json 형식으로 전송해 주세요.');
   }
@@ -163,11 +226,16 @@ async function readBoundedJson(request) {
   if (declared > MAX_BODY_BYTES) throw new ApiError(413, 'PAYLOAD_TOO_LARGE', '전송할 움직임 데이터가 너무 큽니다.');
   if (!request.body) invalid();
   const reader = request.body.getReader();
+  // Releasing the reader rejects a pending read without destroying the local
+  // Node request socket before the server can return its timeout response.
+  const stopReading = () => { try { reader.releaseLock(); } catch {} };
+  signal.addEventListener('abort', stopReading, { once: true });
   const chunks = [];
   let length = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
+      assertActive(signal);
       if (done) break;
       length += value.byteLength;
       if (length > MAX_BODY_BYTES) {
@@ -177,7 +245,8 @@ async function readBoundedJson(request) {
       chunks.push(value);
     }
   } finally {
-    reader.releaseLock();
+    signal.removeEventListener('abort', stopReading);
+    stopReading();
   }
   const bytes = new Uint8Array(length);
   let offset = 0;
@@ -192,49 +261,54 @@ function cleanAnalysis(value) {
     if (typeof item !== 'string' || !item.trim() || item.length > max) throw new Error('Invalid analysis text');
     return item.trim();
   };
-  const list = item => {
-    if (!Array.isArray(item) || item.length < 1 || item.length > 4) throw new Error('Invalid analysis list');
-    return item.map(entry => text(entry, 500));
-  };
+  const impression = text(value.impression, 40);
+  if (!LABEL_SET.has(impression) || !Array.isArray(value.qualities) || value.qualities.length !== 3) {
+    throw new Error('Invalid vocabulary');
+  }
+  const qualities = value.qualities.map(item => text(item, 40));
+  if (new Set(qualities).size !== 3 || qualities.some(item => !LABEL_SET.has(item)) || !qualities.includes(impression)) {
+    throw new Error('Invalid vocabulary');
+  }
+  if (!Array.isArray(value.observations) || value.observations.length < 1 || value.observations.length > 2) {
+    throw new Error('Invalid observations');
+  }
   return {
-    impression: text(value.impression, 80),
-    description: text(value.description, 1600),
-    observations: list(value.observations),
-    qualities: list(value.qualities),
+    impression,
+    description: text(value.description, 400),
+    observations: value.observations.map(item => text(item, 160)),
+    qualities,
     // A server-owned caveat remains visible even if the model omits its disclaimer.
     caveat: '움직임에서 느껴질 수 있는 시각적 인상을 설명한 것으로, 실제 감정이나 의도를 판정한 결과가 아닙니다.',
   };
 }
 
-async function analyze(motion, env, fetchImpl, timeoutMs) {
+async function analyze(motion, env, fetchImpl, signal) {
   const model = env.GEMINI_MODEL || DEFAULT_MODEL;
   if (!/^gemini-[a-zA-Z0-9.-]+$/.test(model)) {
     throw new ApiError(503, 'MODEL_CONFIG', '서버의 AI 모델 설정을 확인해 주세요.');
   }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    assertActive(signal);
     const generationConfig = {
-      temperature: 0.5,
-      maxOutputTokens: 2400,
+      temperature: 1,
+      maxOutputTokens: 600,
       responseMimeType: 'application/json',
       responseSchema: OUTPUT_SCHEMA,
     };
     if (model === 'gemini-2.5-flash') generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    if (model === 'gemini-3.8-flash') {
-      generationConfig.temperature = 1;
-      generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
-    }
+    if (model === DEFAULT_MODEL) generationConfig.thinkingConfig = { thinkingLevel: 'MINIMAL' };
+    else if (model.startsWith('gemini-3.')) generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
     const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: 'user', parts: [{ text: JSON.stringify(motion) }] }],
+        contents: [{ role: 'user', parts: [{ text: JSON.stringify(compactMotion(motion)) }] }],
         generationConfig,
       }),
-      signal: controller.signal,
+      signal,
     });
+    assertActive(signal);
     if (response.status === 429) throw new ApiError(429, 'PROVIDER_QUOTA', 'Gemini 무료 사용량 또는 요청 한도에 도달했습니다. 잠시 후 다시 시도해 주세요.');
     if (response.status === 404) {
       throw new ApiError(503, 'MODEL_UNAVAILABLE', '현재 AI 모델을 이 계정에서 사용할 수 없습니다. 서버의 모델 설정을 확인해 주세요.');
@@ -244,6 +318,7 @@ async function analyze(motion, env, fetchImpl, timeoutMs) {
     }
     if (!response.ok) throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'AI 서비스가 잠시 응답하지 않습니다. 나중에 다시 시도해 주세요.');
     const payload = await response.json();
+    assertActive(signal);
     const candidate = payload.candidates?.[0];
     if (!candidate || candidate.finishReason !== 'STOP') {
       throw new ApiError(502, 'INCOMPLETE_ANALYSIS', 'AI가 분석을 완성하지 못했습니다. 다시 시도해 주세요.');
@@ -253,10 +328,8 @@ async function analyze(motion, env, fetchImpl, timeoutMs) {
     catch { throw new ApiError(502, 'INVALID_ANALYSIS', 'AI 응답 형식이 올바르지 않습니다. 다시 시도해 주세요.'); }
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    if (controller.signal.aborted) throw new ApiError(504, 'AI_TIMEOUT', 'AI 분석 시간이 길어지고 있습니다. 잠시 후 다시 시도해 주세요.');
+    if (signal.aborted) throw timedOut();
     throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'AI 서비스 연결에 실패했습니다. 네트워크 상태를 확인해 주세요.');
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -273,7 +346,7 @@ export function createLocalLimiter({ limit = 12, periodMs = 60000 } = {}) {
 
 export async function handleApi(request, {
   env = {}, fetchImpl = fetch, checkLimit = async () => true,
-  allowLocal = false, requireOrigin = false, timeoutMs = 90000,
+  allowLocal = false, requireOrigin = false, timeoutMs = ANALYSIS_DEADLINE_MS,
 } = {}) {
   const url = new URL(request.url);
   const origin = request.headers.get('origin');
@@ -305,11 +378,17 @@ export async function handleApi(request, {
     }
     if (request.method !== 'POST') throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'POST 요청만 가능합니다.');
     if (!env.GEMINI_API_KEY?.trim()) {
-      throw new ApiError(503, 'NOT_CONFIGURED', 'AI 서버에 Gemini API 키가 아직 연결되지 않았습니다. 움직임 기록과 특징 확인은 계속 사용할 수 있습니다.');
+      throw new ApiError(503, 'NOT_CONFIGURED', 'AI 서버에 Gemini API 키가 아직 연결되지 않았습니다. 움직임 기록과 재생은 계속 사용할 수 있습니다.');
     }
-    const motion = validateMotion(await readBoundedJson(request));
-    if (!await checkLimit(request)) throw new ApiError(429, 'RATE_LIMITED', '분석 요청이 많습니다. 1분 뒤에 다시 시도해 주세요.');
-    return json(200, await analyze(motion, env, fetchImpl, timeoutMs));
+    const result = await withDeadline(async signal => {
+      const motion = validateMotion(await readBoundedJson(request, signal));
+      assertActive(signal);
+      const permitted = await checkLimit(request);
+      assertActive(signal);
+      if (!permitted) throw new ApiError(429, 'RATE_LIMITED', '분석 요청이 많습니다. 1분 뒤에 다시 시도해 주세요.');
+      return analyze(motion, env, fetchImpl, signal);
+    }, timeoutMs);
+    return json(200, result);
   } catch (error) {
     const known = error instanceof ApiError;
     const status = known ? error.status : 500;

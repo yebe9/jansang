@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const handler = import('../api/handler.mjs');
+const providerMotion = async value => (await handler).compactMotion(value);
 const origin = 'https://yebe9.github.io';
 const env = { GEMINI_API_KEY: 'mock-server-key', ALLOWED_ORIGIN: origin };
 const motion = () => ({
@@ -18,8 +19,8 @@ const request = (body = motion(), headers = {}) => new Request('https://worker.t
 });
 const noFetch = async () => { throw new Error('Provider must not be called'); };
 const validAnalysis = {
-  impression: '흐르는 듯한', description: '손목의 위치가 부드럽게 옮겨갑니다.',
-  observations: ['두 손목이 아래쪽으로 이동합니다.'], qualities: ['유연한'],
+  impression: '유려한', description: '손목의 자취가 부드럽게 흘러갑니다. 이어지는 선이 우아한 인상을 줍니다.',
+  observations: ['두 손목이 아래쪽으로 이동합니다.'], qualities: ['유려한', '매끄러운', '우아한'],
   caveat: '원본 영상은 보지 않았습니다.',
 };
 const goodResponse = () => new Response(JSON.stringify({
@@ -29,7 +30,7 @@ const goodResponse = () => new Response(JSON.stringify({
 test('status exposes capability without exposing the server key', async () => {
   const { handleApi } = await handler;
   const response = await handleApi(new Request('https://worker.test/api/status', { headers: { Origin: origin } }), { env });
-  assert.deepEqual(await response.json(), { available: true, provider: 'Gemini', model: 'gemini-3.8-flash' });
+  assert.deepEqual(await response.json(), { available: true, provider: 'Gemini', model: 'gemini-3.5-flash-lite' });
   const local = await handleApi(new Request('http://127.0.0.1:4173/api/status'), { env, allowLocal: true });
   assert.equal(local.status, 200);
 });
@@ -100,10 +101,10 @@ test('full-body numeric samples reach Gemini while face coordinates are rejected
   assert.deepEqual(validateMotion(report.payload), report.payload);
   const response = await handleApi(request(report.payload), { env, fetchImpl: async (_url, init) => {
     const body = JSON.parse(init.body);
-    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), report.payload);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(report.payload));
     assert.match(body.systemInstruction.parts[0].text, /스텝과 다리 리듬/);
     assert.match(body.systemInstruction.parts[0].text, /숫자나 지표명은 description과 observations에 절대 나열하지 않는다/);
-    assert.match(body.systemInstruction.parts[0].text, /"초조한".*장면의 인상/);
+    assert.match(body.systemInstruction.parts[0].text, /감정 관련 표현은 장면의 비유적 인상/);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 3);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.maxItems, 3);
     return goodResponse();
@@ -147,7 +148,7 @@ test('hand traces reach Gemini with the selected target and no unsupported whole
     assert.deepEqual(validateMotion(report.payload), report.payload);
     const response = await handleApi(request(report.payload), { env, fetchImpl: async (_url, init) => {
       const body = JSON.parse(init.body);
-      assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), report.payload);
+      assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(report.payload));
       const prompt = body.systemInstruction.parts[0].text;
       assert.match(prompt, /source가 hand이면 웹캠으로 한 손 또는 두 손을 관측/);
       assert.match(prompt, /전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다/);
@@ -196,12 +197,16 @@ test('two complete observed hands fit the bounded request and reach Gemini as se
   assert.deepEqual(validateMotion(report.payload), report.payload);
   const response = await handleApi(request(report.payload), { env, fetchImpl: async (_url, init) => {
     const body = JSON.parse(init.body);
-    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), report.payload);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(report.payload));
     const prompt = body.systemInstruction.parts[0].text;
     assert.match(prompt, /해부학적 왼손·오른손을 뜻하지 않는다/);
     assert.match(prompt, /두 손이 동시에 보인 연속 구간에서만/);
     assert.match(prompt, /한 손씩 번갈아 관측된 기록으로 두 손의 협응을 상상하지 않는다/);
     assert.match(prompt, /같은 시간 구간을 두 번 세지 않는다/);
+    assert.match(prompt, /두 손이 교차했다고 쓰려면 선택 지점들의 상대 위치가 실제로 교차한 근거/);
+    assert.match(prompt, /화면의 겹침만으로 실제 접촉을 단정할 수 없다/);
+    assert.match(prompt, /누락된 구간을 채워 전체 모양·교차·접촉·회전을 상상하지 않는다/);
+    assert.match(prompt, /잔상\(Ghosting\)/);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 3);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.maxItems, 3);
     return goodResponse();
@@ -226,7 +231,7 @@ test('legacy single-hand API clients are accepted and normalized to a single tra
   assert.equal(normalized.samples[1].segment, 1);
   const response = await handleApi(request(legacy), { env, fetchImpl: async (_url, init) => {
     const body = JSON.parse(init.body);
-    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), normalized);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(normalized));
     return goodResponse();
   } });
   assert.equal(response.status, 200);
@@ -315,7 +320,7 @@ test('pause segment identifiers survive validation and reach the model', async (
   segmented.samples[1].segment = 2;
   const response = await handleApi(request(segmented), { env, fetchImpl: async (_url, init) => {
     const body = JSON.parse(init.body);
-    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), segmented);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(segmented));
     assert.match(body.systemInstruction.parts[0].text, /다른 segment 사이를 연결하거나/);
     assert.match(body.systemInstruction.parts[0].text, /화면 대각선 길이를 1/);
     return goodResponse();
@@ -350,10 +355,11 @@ test('successful analysis uses an env key and constrained JSON prompt, retaining
     assert.ok(!url.includes(env.GEMINI_API_KEY));
     assert.equal(init.headers['x-goog-api-key'], env.GEMINI_API_KEY);
     const body = JSON.parse(init.body);
-    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), motion());
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(motion()));
     assert.equal(body.generationConfig.responseMimeType, 'application/json');
-    assert.match(url, /models\/gemini-3\.8-flash:generateContent$/);
-    assert.deepEqual(body.generationConfig.thinkingConfig, { thinkingLevel: 'LOW' });
+    assert.match(url, /models\/gemini-3\.5-flash-lite:generateContent$/);
+    assert.deepEqual(body.generationConfig.thinkingConfig, { thinkingLevel: 'MINIMAL' });
+    assert.equal(body.generationConfig.maxOutputTokens, 600);
     assert.match(body.systemInstruction.parts[0].text, /실제 감정/);
     return goodResponse();
   } });
@@ -364,6 +370,181 @@ test('successful analysis uses an env key and constrained JSON prompt, retaining
   assert.match(result.analysis.caveat, /실제 감정이나 의도를 판정한 결과가 아닙니다/);
   assert.equal(response.headers.get('Access-Control-Allow-Origin'), origin);
   assert.ok(!JSON.stringify(result).includes(env.GEMINI_API_KEY));
+});
+
+test('output schema uses exactly the supplied vocabulary and rejects invented or duplicate labels', async () => {
+  const { handleApi } = await handler;
+  const { DANCE_VOCABULARY } = await import('../api/dance-vocabulary.mjs');
+  const labels = DANCE_VOCABULARY.map(item => item.label);
+  assert.equal(labels.length, 50);
+  assert.equal(new Set(labels).size, 50);
+  assert.equal(new Set(DANCE_VOCABULARY.map(item => item.category)).size, 6);
+  assert.ok(DANCE_VOCABULARY.every(item => item.description && item.category));
+  assert.ok(labels.includes('나비 같은') && labels.includes('호소력 짙은'));
+  assert.ok(!labels.includes('빠른'), 'Generic old fallback terms are not silently added to the user’s vocabulary');
+  const response = await handleApi(request(), { env, fetchImpl: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const schema = body.generationConfig.responseSchema.properties;
+    assert.deepEqual(schema.impression.enum, labels);
+    assert.deepEqual(schema.qualities.items.enum, labels);
+    assert.equal(schema.observations.maxItems, 2);
+    assert.ok(DANCE_VOCABULARY.every(item => body.systemInstruction.parts[0].text.includes(item.label + ': ' + item.description)));
+    return goodResponse();
+  } });
+  assert.equal(response.status, 200);
+  for (const patch of [
+    { impression: '빠른' },
+    { qualities: ['유려한', '빠른', '우아한'] },
+    { qualities: ['유려한', '유려한', '우아한'] },
+    { qualities: ['유려한'] },
+    { qualities: ['매끄러운', '우아한', '미니멀한'] },
+    { observations: ['하나', '둘', '셋'] },
+  ]) {
+    let calls = 0;
+    const invalid = await handleApi(request(), { env, fetchImpl: async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ candidates: [{
+        finishReason: 'STOP', content: { parts: [{ text: JSON.stringify({ ...validAnalysis, ...patch }) }] }
+      }] }));
+    } });
+    assert.equal(invalid.status, 502);
+    const result = await invalid.json();
+    assert.equal(result.error.code, 'INVALID_ANALYSIS');
+    assert.equal(result.analysis, undefined, 'Invalid AI output must not become a local substitute result');
+    assert.equal(calls, 1, 'No hidden retries');
+  }
+});
+
+test('provider summary retains both targets, actual timing and identity boundaries within 24 frames', async () => {
+  const { compactMotion } = await handler;
+  const data = {
+    source: 'hand', handTarget: 'wrist', durationMs: 9900, sampleCount: 150,
+    metrics: { meanSpeed: 0.234567, trackedDurationMs: 9000 },
+    samples: Array.from({ length: 60 }, (_, i) => ({
+      t: i * 165, segment: i < 30 ? 1 : 2,
+      hands: (i < 20 || i >= 25 ? [1, 2] : [1]).map(id => ({
+        id, joints: {
+          wrist: [0.123456 + i / 200, id / 3],
+          indexMcp: [0.345678, 0.4], indexTip: [0.456789, 0.5],
+          thumbTip: [0.567891, 0.6], middleTip: [0.678912, 0.7],
+          ringTip: [0.789123, 0.8], pinkyTip: [0.891234, 0.9],
+          thumbCmc: [0.2, 0.3], indexPip: [0.4, 0.5]
+        }
+      }))
+    }))
+  };
+  const untouched = structuredClone(data);
+  const summary = compactMotion(data);
+  assert.equal(summary.samples.length, 24);
+  assert.equal(summary.samples[0].t, data.samples[0].t);
+  assert.equal(summary.samples.at(-1).t, data.samples.at(-1).t);
+  assert.deepEqual(data, untouched, 'Provider compaction must not mutate a stored recording');
+  for (const index of [19, 20, 24, 25, 29, 30]) {
+    assert.ok(summary.samples.some(frame => frame.t === data.samples[index].t), 'Preserve the boundary at ' + index);
+  }
+  for (const frame of summary.samples) {
+    const observed = data.samples.find(item => item.t === frame.t);
+    assert.deepEqual(frame.hands.map(hand => hand.id), observed.hands.map(hand => hand.id));
+    assert.equal(frame.segment, observed.segment);
+    for (const hand of frame.hands) {
+      assert.equal(Object.keys(hand.joints).length, 7);
+      assert.ok(hand.joints.wrist && hand.joints.indexTip);
+      assert.equal(hand.joints.indexPip, undefined);
+      assert.equal(hand.joints.wrist[0], Math.round(observed.hands.find(item => item.id === hand.id).joints.wrist[0] * 1000) / 1000);
+    }
+  }
+  assert.equal(summary.samples.find(frame => frame.t === data.samples[25].t).hands.find(hand => hand.id === 2).breakBefore, true);
+  assert.equal(summary.samples.find(frame => frame.t === data.samples[30].t).breakBefore, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(summary)) < Buffer.byteLength(JSON.stringify(data)) / 2);
+});
+
+test('dense omitted boundaries and missing body joints cannot imply continuous movement', async () => {
+  const { compactMotion } = await handler;
+  const data = {
+    source: 'hand', handTarget: 'indexTip', durationMs: 10000, sampleCount: 60, metrics: {},
+    samples: Array.from({ length: 60 }, (_, i) => ({
+      t: i * 150, segment: i,
+      hands: [{ id: 1, joints: { wrist: [0.3, 0.4], indexTip: [i / 60, 0.5] } }]
+    }))
+  };
+  const summary = compactMotion(data);
+  assert.equal(summary.samples.length, 24);
+  assert.ok(summary.samples.slice(1).every(frame => frame.breakBefore));
+  const body = {
+    ...data, source: 'webcam',
+    samples: data.samples.map((frame, i) => ({
+      t: frame.t, segment: 0,
+      joints: { leftWrist: [0.2, 0.3], rightWrist: [0.7, 0.3], ...(i % 2 ? {} : { leftKnee: [0.3, 0.7] }) }
+    }))
+  };
+  delete body.handTarget;
+  assert.ok(compactMotion(body).samples.slice(1).every(frame => frame.breakBefore));
+});
+
+test('a real deadline ends abort-ignoring fetches and stalled provider response bodies', async () => {
+  const { handleApi } = await handler;
+  for (const stall of ['headers', 'body']) {
+    let seenSignal;
+    let calls = 0;
+    const start = performance.now();
+    const response = await handleApi(request(), {
+      env, timeoutMs: 25,
+      fetchImpl: async (_url, init) => {
+        calls += 1;
+        seenSignal = init.signal;
+        if (stall === 'headers') return new Promise(() => {});
+        return { status: 200, ok: true, json: () => new Promise(() => {}) };
+      }
+    });
+    assert.equal(response.status, 504);
+    assert.equal((await response.json()).error.code, 'AI_TIMEOUT');
+    assert.ok(performance.now() - start < 500, 'Timeout must not wait for the stalled transport');
+    assert.equal(seenSignal.aborted, true);
+    assert.equal(calls, 1);
+  }
+});
+
+test('the same deadline covers a stalled incoming body and rate limiter before any provider call', async () => {
+  const { handleApi } = await handler;
+  const slowBody = new Request('https://worker.test/api/analyze', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, duplex: 'half',
+    body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{')); } })
+  });
+  const started = performance.now();
+  const bodyResponse = await handleApi(slowBody, { env, timeoutMs: 25, fetchImpl: noFetch });
+  assert.equal(bodyResponse.status, 504);
+  assert.equal((await bodyResponse.json()).error.code, 'AI_TIMEOUT');
+  assert.equal(slowBody.body.locked, false);
+  assert.ok(performance.now() - started < 500);
+  let releaseLimit;
+  let providerCalls = 0;
+  const response = await handleApi(request(), {
+    env, timeoutMs: 25,
+    checkLimit: () => new Promise(resolve => { releaseLimit = resolve; }),
+    fetchImpl: async () => { providerCalls++; return goodResponse(); }
+  });
+  assert.equal(response.status, 504);
+  releaseLimit(true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(providerCalls, 0, 'A late limiter must not dispatch an AI request after timeout');
+});
+
+test('the timeout cannot be configured past the 13-second server budget', async t => {
+  const { handleApi, ANALYSIS_DEADLINE_MS } = await handler;
+  assert.equal(ANALYSIS_DEADLINE_MS, 13000);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = false;
+  const pending = handleApi(request(), {
+    env, timeoutMs: 90000, fetchImpl: () => new Promise(() => {})
+  }).then(result => { settled = true; return result; });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(12999);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  const response = await pending;
+  assert.equal(response.status, 504);
+  assert.equal((await response.json()).error.code, 'AI_TIMEOUT');
 });
 
 test('provider quota, rejected key, outage, malformed output and timeout are actionable errors', async () => {
