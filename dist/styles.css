@@ -37,6 +37,22 @@
 .analysis-evidence ul{margin:0;padding-left:15px;font-size:11px;color:#a9c1b1;line-height:1.85}
 .analysis-evidence li+li{margin-top:6px}
 #analysis-caveat{font-size:9px;color:#8ca898;line-height:1.8;margin:10px 0 0}
+.log-link{font-size:11px;color:#c4d5c7;text-decoration:none;border:1px solid #7d9b874d;border-radius:7px;padding:10px 13px;white-space:nowrap}
+.log-link span{margin-left:8px;color:#e5b399}
+.log-link:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.private-log{margin-top:20px;padding:17px 15px;border:1px solid #75938150;border-radius:9px;background:#20332f}
+.private-log h2{font-size:13px;font-weight:500;margin:0 0 10px;color:#d2e2d0}
+.private-log p{font-size:11px;line-height:1.8;color:#a9bfb0;margin:8px 0}
+.private-log small{display:block;font-size:9px;line-height:1.8;color:#8ea797}
+.save-log{width:100%;padding:12px 10px;border:1px solid #b89e7655;border-radius:6px;background:#3a4034;color:#e0d0ae;font-size:12px;margin:5px 0}
+.candidate-evidence>p{font-size:10px;color:#9cb3a2;line-height:1.8;margin:9px 0}
+.candidate-evidence ol{margin:10px 0 0;padding-left:19px;color:#a5c1ab}
+.candidate-evidence li+li{margin-top:12px}
+.candidate-evidence strong{font-size:11px;font-weight:500;color:#d7dcb8}
+.candidate-evidence li p{font-size:10px;line-height:1.8;margin:4px 0;color:#a8bfae}
+.video-consent{border-top:1px solid #809b8129;padding-top:12px}
+#video-capture-status{color:#cdbb96}
+@media(max-width:600px){.log-link{padding:8px;font-size:10px}.journey{display:none}}
 #analyze-button::after{content:none}
 #analyze-button{margin:14px 0}
 .interpretation>.comparison-insight{margin-top:14px}

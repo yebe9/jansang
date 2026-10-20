@@ -2,7 +2,14 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const handler = import('../api/handler.mjs');
 const encoding = import('../api/motion-encoding.mjs');
-const providerMotion = async value => (await encoding).encodeMotion((await handler).compactMotion(value));
+const rubricModule = import('../api/expression-rubric.mjs');
+const providerMotion = async value => {
+  const rubric = (await rubricModule).evaluateExpressionRubric(value);
+  return {
+    ...(await encoding).encodeMotion((await handler).compactMotion(value)),
+    expressionRubric: { version: rubric.version, eligible: rubric.eligible, metrics: rubric.metrics },
+  };
+};
 const origin = 'https://yebe9.github.io';
 const env = { GEMINI_API_KEY: 'mock-server-key', ALLOWED_ORIGIN: origin };
 const motion = () => ({
@@ -20,8 +27,8 @@ const request = (body = motion(), headers = {}) => new Request('https://worker.t
 });
 const noFetch = async () => { throw new Error('Provider must not be called'); };
 const validAnalysis = {
-  impression: '유려한', description: '손목의 자취가 부드럽게 흘러갑니다. 이어지는 선이 우아한 인상을 줍니다.',
-  observations: ['두 손목이 아래쪽으로 이동합니다.'], qualities: ['유려한', '매끄러운', '우아한'],
+  impression: '매끄러운', description: '손목의 자취가 부드럽게 흘러갑니다. 이어지는 선이 우아한 인상을 줍니다.',
+  observations: ['두 손목이 아래쪽으로 이동합니다.'], qualities: ['매끄러운', '우아한'],
   caveat: '원본 영상은 보지 않았습니다.',
 };
 const goodResponse = () => new Response(JSON.stringify({
@@ -69,6 +76,10 @@ test('only bounded numeric movements are accepted; intention and raw images are 
     data => { data.metrics.lowerBodySpeed = 126; },
     data => { data.metrics.upperBodySpeed = -1; },
     data => { data.metrics.torsoSpeed = 'fast'; },
+    data => { data.captureAspect = 0.1999; },
+    data => { data.captureAspect = 5.0001; },
+    data => { data.captureAspect = null; },
+    data => { data.captureAspect = '1.777'; },
   ]) {
     const bad = motion(); mutate(bad);
     const response = await handleApi(request(bad), { env, fetchImpl: noFetch });
@@ -77,6 +88,20 @@ test('only bounded numeric movements are accepted; intention and raw images are 
   assert.throws(() => validateMotion({ ...motion(), metrics: { meanSpeed: NaN } }));
   const tooBig = await handleApi(request({ padding: 'x'.repeat(102401) }), { env, fetchImpl: noFetch });
   assert.equal(tooBig.status, 413);
+});
+
+test('optional capture aspect is bounded, preserved through validation and provider encoding, and legacy requests still work', async () => {
+  const { validateMotion, compactMotion, buildAnalysisRequest } = await handler;
+  for (const aspect of [0.2, 1, 16 / 9, 5]) {
+    const data = { ...motion(), captureAspect: aspect };
+    assert.equal(validateMotion(data).captureAspect, aspect);
+    assert.equal(compactMotion(validateMotion(data)).captureAspect, aspect);
+    const encoded = JSON.parse(buildAnalysisRequest(validateMotion(data)).contents[0].parts[0].text);
+    assert.equal(encoded.captureAspect, aspect);
+  }
+  assert.ok(!Object.hasOwn(validateMotion(motion()), 'captureAspect'));
+  assert.throws(() => validateMotion({ ...motion(), captureAspect: Infinity }));
+  assert.throws(() => validateMotion({ ...motion(), captureAspect: NaN }));
 });
 
 test('full-body numeric samples reach Gemini while face coordinates are rejected', async () => {
@@ -104,9 +129,9 @@ test('full-body numeric samples reach Gemini while face coordinates are rejected
     const body = JSON.parse(init.body);
     assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), await providerMotion(report.payload));
     assert.match(body.systemInstruction.parts[0].text, /발이 보이면 스텝/);
-    assert.match(body.systemInstruction.parts[0].text, /숫자·지표명·점수·진단은 쓰지 않는다/);
+    assert.match(body.systemInstruction.parts[0].text, /감상에 숫자·지표명·점수·진단은 쓰지 않는다/);
     assert.match(body.systemInstruction.parts[0].text, /감정 어휘는 시각적 비유/);
-    assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 3);
+    assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 1);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.maxItems, 3);
     return goodResponse();
   } });
@@ -206,7 +231,7 @@ test('two complete observed hands fit the bounded request and reach Gemini as se
     assert.match(prompt, /큰 시간 공백·가림·누락을 채우지 말고/);
     assert.match(prompt, /한 손의 움직임을 전체 정지로 오해하지 않는다/);
     assert.match(prompt, /잔상\(Ghosting\)/);
-    assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 3);
+    assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 1);
     assert.equal(body.generationConfig.responseSchema.properties.qualities.maxItems, 3);
     return goodResponse();
   } });
@@ -384,11 +409,14 @@ test('output schema keeps the supplied vocabulary and rejects missing prose or a
   const response = await handleApi(request(), { env, fetchImpl: async (_url, init) => {
     const body = JSON.parse(init.body);
     const schema = body.generationConfig.responseSchema.properties;
-    assert.deepEqual(schema.impression.enum, labels);
-    assert.deepEqual(schema.qualities.items.enum, labels);
+    const allowed = labels.filter(label => !['유연한', '유려한'].includes(label));
+    assert.deepEqual(schema.impression.enum, allowed);
+    assert.deepEqual(schema.qualities.items.enum, allowed);
+    assert.deepEqual(schema.candidates.items.properties.label.enum, allowed);
     assert.equal(schema.observations.maxItems, 1);
-    assert.ok(DANCE_VOCABULARY.every(item => !body.systemInstruction.parts[0].text.includes(item.description)),
-      'Vocabulary definitions are not repeated in the prompt; exact allowed labels remain in both enums');
+    const { VISUAL_DEFINITIONS } = await rubricModule;
+    assert.ok(labels.every(label => body.systemInstruction.parts[0].text.includes(label + ':' + VISUAL_DEFINITIONS[label])),
+      'All 50 labels have concise visual distinctions, even when an empirical gate excludes two from selection');
     return goodResponse();
   } });
   assert.equal(response.status, 200);
@@ -414,7 +442,7 @@ test('output schema keeps the supplied vocabulary and rejects missing prose or a
   }
 });
 
-test('request builder keeps all source safeguards in a short prompt and caps the encoded observations', async () => {
+test('request builder keeps source safeguards and concise visual definitions while capping encoded observations', async () => {
   const { buildAnalysisRequest, compactMotion } = await handler;
   const data = motion();
   data.durationMs = 10000;
@@ -431,12 +459,14 @@ test('request builder keeps all source safeguards in a short prompt and caps the
   assert.equal(encoded.rows.length, 24, 'The transport still caps observations regardless of motion speed');
   assert.deepEqual(encoded, await providerMotion(data));
   assert.deepEqual(data, original, 'Provider encoding must not change the browser recording');
-  assert.ok(prompt.length <= 1100, 'System instructions remain bounded instead of repeating all 50 definitions');
+  assert.ok(prompt.length <= 3500, 'Visual distinctions and score instructions remain bounded');
   assert.match(prompt, /영상·얼굴·음성·사용자 의도는 없다/);
   assert.match(prompt, /null은 미관측/);
   assert.match(prompt, /breakBefore=1/);
   assert.match(prompt, /pointer는 선만 읽고 example은 합성 예시임을 감상에 밝힌다/);
-  assert.ok(Buffer.byteLength(body.contents[0].parts[0].text) < Buffer.byteLength(JSON.stringify(compactMotion(data))));
+  const { expressionRubric, ...encodedMotion } = encoded;
+  assert.ok(Buffer.byteLength(JSON.stringify(encodedMotion)) < Buffer.byteLength(JSON.stringify(compactMotion(data))));
+  assert.equal(expressionRubric.version, 'visual-rubric-v1');
   assert.ok(!JSON.stringify(body).includes(env.GEMINI_API_KEY));
 });
 
@@ -636,11 +666,11 @@ test('format-only variations preserve actual AI prose and never invent additiona
   const cases = [
     [{ ...validAnalysis, impression: '  **절도있는**  ', qualities: [' 절도 있는 ', '날카로운', '날카로운', '빠른'] },
       ['절도 있는', '날카로운']],
-    [{ ...validAnalysis, qualities: ['유려한', '유려한'] }, ['유려한']],
-    [{ ...validAnalysis, qualities: undefined }, ['유려한']],
-    [{ ...validAnalysis, qualities: '유려한 · 매끄러운 · 우아한' }, ['유려한', '매끄러운', '우아한']],
+    [{ ...validAnalysis, qualities: ['매끄러운', '매끄러운'] }, ['매끄러운']],
+    [{ ...validAnalysis, qualities: undefined }, ['매끄러운']],
+    [{ ...validAnalysis, qualities: '매끄러운 · 우아한' }, ['매끄러운', '우아한']],
     [{ ...validAnalysis, qualities: ['매끄러운', '우아한', '미니멀한'], observations: '한 줄의 실제 AI 관측입니다.' },
-      ['유려한', '매끄러운', '우아한']],
+      ['매끄러운', '우아한', '미니멀한']],
     [{ ...validAnalysis, observations: ['관측 하나', '관측 둘', '관측 셋'] }, validAnalysis.qualities]
   ];
   for (const [analysis, expected] of cases) {
@@ -656,6 +686,99 @@ test('format-only variations preserve actual AI prose and never invent additiona
     assert.deepEqual(output.qualities, expected);
     assert.equal(output.description, analysis.description);
     assert.ok(output.observations.length >= 1 && output.observations.length <= 2);
+    assert.equal(calls, 1);
+  }
+});
+
+test('AI candidate scores remain actual reported values, allow ties and do not force variety', async () => {
+  const { handleApi } = await handler;
+  const candidates = [
+    { label: '매끄러운', score: 82.5, evidence: '연결에서 튀는 구간이 적습니다.' },
+    { label: '우아한', score: 82.5, evidence: '선의 폭이 절제되어 있습니다.' },
+    { label: '미니멀한', score: 0, evidence: '이동 범위가 작지 않습니다.' },
+  ];
+  for (let iteration = 0; iteration < 2; iteration++) {
+    const response = await handleApi(request(), { env, fetchImpl: async (_url, init) => {
+      const schema = JSON.parse(init.body).generationConfig.responseSchema.properties;
+      assert.equal(schema.qualities.minItems, 1);
+      assert.equal(schema.candidates.maxItems, 5);
+      assert.equal(schema.candidates.items.properties.score.minimum, 0);
+      assert.equal(schema.candidates.items.properties.score.maximum, 100);
+      return new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: {
+        parts: [{ text: JSON.stringify({ ...validAnalysis, qualities: ['매끄러운'], candidates }) }],
+      } }] }));
+    } });
+    assert.equal(response.status, 200);
+    const analysis = (await response.json()).analysis;
+    assert.deepEqual(analysis.candidates, candidates);
+    assert.deepEqual(analysis.qualities, ['매끄러운'], 'No second or third label is invented for diversity');
+    assert.equal(analysis.rubric.candidateRankingConsistent, true);
+    assert.equal(analysis.rubric.kind, 'heuristic');
+    assert.match(analysis.rubric.note, /측정이 아닙니다/);
+    assert.ok(Object.values(analysis.rubric.metrics).every(value => value === null || Number.isFinite(value)));
+  }
+});
+
+test('candidate disagreement and missing candidate scores never rewrite the representative or fabricate scores', async () => {
+  const { handleApi } = await handler;
+  for (const [candidates, consistency] of [
+    [[{ label: '매끄러운', score: 40, evidence: '이음새가 비교적 부드럽습니다.' },
+      { label: '우아한', score: 80, evidence: '넓이가 절제되어 있습니다.' }], false],
+    [[{ label: '우아한', score: 80, evidence: '넓이가 절제되어 있습니다.' }], null],
+    [undefined, null],
+  ]) {
+    const response = await handleApi(request(), { env, fetchImpl: async () =>
+      new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: {
+        parts: [{ text: JSON.stringify({ ...validAnalysis, candidates }) }],
+      } }] })) });
+    assert.equal(response.status, 200);
+    const analysis = (await response.json()).analysis;
+    assert.equal(analysis.impression, validAnalysis.impression);
+    assert.deepEqual(analysis.candidates, candidates);
+    assert.equal(analysis.rubric.candidateRankingConsistent, consistency);
+    if (!candidates) assert.ok(!Object.hasOwn(analysis, 'candidates'), 'Legacy output has no implicit candidate scores');
+  }
+});
+
+test('invalid or ineligible auxiliary candidates are omitted without inventing, clamping or failing valid AI prose', async () => {
+  const { handleApi } = await handler;
+  const candidates = [
+    { label: '유연한', score: 90, evidence: 'A curve is not joint flexibility' },
+    { label: '유려한', score: 85, evidence: 'Too short to qualify' },
+    { label: '빠른', score: 80, evidence: 'Unknown label' },
+    { label: '우아한', score: '90', evidence: 'A string is not a reported numeric score' },
+    { label: '매끄러운', score: 101, evidence: 'Do not clamp' },
+    { label: '직선적인', score: -1, evidence: 'Do not clamp' },
+    { label: '몽환적인', score: 80, evidence: '' },
+    { label: '기하학적인', score: null, evidence: 'Missing is not zero' },
+    { label: '매끄러운', score: 76, evidence: '모델이 적은 실제 근거입니다.' },
+    { label: '매끄러운', score: 99, evidence: '중복 후보를 더 높은 값으로 바꾸지 않습니다.' },
+  ];
+  const response = await handleApi(request(), { env, fetchImpl: async () =>
+    new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: {
+      parts: [{ text: JSON.stringify({ ...validAnalysis, qualities: ['유연한', '유려한', '우아한'], candidates }) }],
+    } }] })) });
+  assert.equal(response.status, 200);
+  const analysis = (await response.json()).analysis;
+  assert.deepEqual(analysis.candidates, [candidates[8]]);
+  assert.deepEqual(analysis.qualities, ['매끄러운', '우아한']);
+  assert.deepEqual(analysis.rubric.eligible, { '유연한': false, '유려한': false });
+});
+
+test('a disallowed main expression is rejected instead of being replaced by an invented alternative', async () => {
+  const { handleApi } = await handler;
+  for (const impression of ['유연한', '유려한']) {
+    let calls = 0;
+    const response = await handleApi(request(), { env, fetchImpl: async () => {
+      calls++;
+      return new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: {
+        parts: [{ text: JSON.stringify({ ...validAnalysis, impression }) }],
+      } }] }));
+    } });
+    assert.equal(response.status, 502);
+    const result = await response.json();
+    assert.equal(result.error.code, 'INVALID_ANALYSIS');
+    assert.equal(result.analysis, undefined);
     assert.equal(calls, 1);
   }
 });

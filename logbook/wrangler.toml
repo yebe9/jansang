@@ -1,0 +1,28 @@
+name = "ghosting-logbook"
+main = "worker.mjs"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ghosting-logbook"
+database_id = "4b1f9a26-46a1-4205-9ab2-8da3709ff0e9"
+
+[[kv_namespaces]]
+binding = "VIDEOS"
+id = "7389c7ed62ad4b418c140ad9246715d6"
+
+[[ratelimits]]
+name = "LOGIN_LIMITER"
+namespace_id = "102003"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "WRITE_LIMITER"
+namespace_id = "102004"
+simple = { limit = 10, period = 60 }

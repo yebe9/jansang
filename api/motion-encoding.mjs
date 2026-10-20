@@ -19,6 +19,7 @@ export function encodeMotion(motion) {
     encoding: 'motion-rows-v1',
     coordinateScale: COORDINATE_SCALE,
     source: motion.source,
+    ...(motion.captureAspect === undefined ? {} : { captureAspect: motion.captureAspect }),
     ...(hand ? { handTarget: motion.handTarget } : {}),
     durationMs: motion.durationMs,
     sampleCount: motion.sampleCount,

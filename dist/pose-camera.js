@@ -28,7 +28,8 @@
  * start() rejects an Error with a Korean message after emitting error status.
  * stop() is idempotent, including during pending permission or model downloads.
  *
- * Frames stay in the browser. No video recording, audio, upload, or storage.
+ * Tracking frames stay in the browser. This class does not record or upload.
+ * The app can separately opt into a video-only clone for the owner's logbook.
  * In body mode MediaPipe internally estimates 33 landmarks, including the face. Facial
  * coordinates are discarded before smoothing, drawing, or onFrame callbacks.
  * This module only downloads the public library/WASM/model assets below.

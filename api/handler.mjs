@@ -2,6 +2,7 @@
 // Only numeric movement data crosses this boundary. No video or intention text.
 import { DANCE_VOCABULARY } from './dance-vocabulary.mjs';
 import { encodeMotion, ENCODING_GUIDE } from './motion-encoding.mjs';
+import { evaluateExpressionRubric, VISUAL_DEFINITIONS } from './expression-rubric.mjs';
 export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 export const MAX_BODY_BYTES = 100 * 1024;
 export const ANALYSIS_DEADLINE_MS = 29000;
@@ -42,17 +43,33 @@ const OUTPUT_SCHEMA = {
     impression: { type: 'STRING', enum: DANCE_LABELS, description: '제공된 50개 표현 중 대표 인상 하나' },
     description: { type: 'STRING', description: '한국어 감상 1~2문장, 합계 100자 이내. 숫자나 기술 용어 금지' },
     observations: { type: 'ARRAY', items: { type: 'STRING', description: '관측 근거 한 문장, 40자 이내' }, minItems: 1, maxItems: 1 },
-    qualities: { type: 'ARRAY', items: { type: 'STRING', enum: DANCE_LABELS }, minItems: 3, maxItems: 3 },
+    qualities: { type: 'ARRAY', items: { type: 'STRING', enum: DANCE_LABELS }, minItems: 1, maxItems: 3 },
+    candidates: {
+      type: 'ARRAY', minItems: 1, maxItems: 5,
+      items: {
+        type: 'OBJECT',
+        properties: {
+          label: { type: 'STRING', enum: DANCE_LABELS },
+          score: { type: 'NUMBER', minimum: 0, maximum: 100 },
+          evidence: { type: 'STRING', description: '관측 근거 25자 이내' },
+        },
+        required: ['label', 'score', 'evidence'],
+      },
+    },
   },
-  required: ['impression', 'description', 'observations', 'qualities'],
+  required: ['impression', 'description', 'observations', 'qualities', 'candidates'],
 };
 
-const SYSTEM_PROMPT = `너는 '잔상(Ghosting)'의 움직임 감상 도우미다. 좌표의 질감·리듬·분위기를 한국어 JSON으로 답한다. impression과 qualities는 스키마 enum의 정확한 표현만 쓰고 qualities는 대표 표현부터 서로 다른 3개를 고른다. 감상 1~2문장과 근거 1개만 짧게 쓴다. 숫자·지표명·점수·진단은 쓰지 않는다.
+const SYSTEM_PROMPT = `너는 '잔상(Ghosting)'의 움직임 감상 도우미다. 좌표의 질감·리듬·분위기를 한국어 JSON으로 답한다. impression과 qualities는 스키마 enum의 정확한 표현만 쓰고 qualities는 대표부터 근거 있는 1~3개만 고른다. 감상 1~2문장과 근거 1개를 짧게 쓴다. 감상에 숫자·지표명·점수·진단은 쓰지 않는다.
+50개 정의를 모두 비교하되 다양성을 위해 억지로 바꾸거나 늘 고르는 익숙한 표현으로 채우지 않는다. candidates는 근거가 있는 상위 후보 최대 5개이며 대표를 포함한다. score는 네가 제시하는 비보정 적합도 0~100이다; 확률·내부 logprob·감정 확률이 아니며 합계 100일 필요도 없다. 동점 가능, 대표를 최고점으로 하고 근거는 후보당 25자 이내다. 미보고 후보는 0점이 아니다.
+expressionRubric은 경험적 선택 제한이다. eligible=false인 유연한·유려한은 후보·대표·태그·감상에 쓰지 않는다. 유연한은 전신 관절 굽힘과 펴짐 근거가 필수이고 단순한 곡선·이동·속도만으로 불가하다. 유려한은 장시간의 안정된 속도·방향 연결이 모두 필요하다. eligible=true여도 자동 선택하지 않는다.
 영상·얼굴·음성·사용자 의도는 없다. 실제 감정·정신 상태·의도·성격·건강·정체성은 추론하지 않는다. 감정 어휘는 시각적 비유이며 음악·실력도 단정하지 않는다.
 ${ENCODING_GUIDE}
 좌표 원점은 좌상단이고 웹캠은 거울 화면이다. 최대 24프레임의 실제 관측만 읽는다. 큰 시간 공백·가림·누락을 채우지 말고 짧거나 불완전하면 확신을 낮춘다.
 webcam은 얼굴 없는 전신으로 보인 부위만, 발이 보이면 스텝도 읽는다. hand는 손만 읽으며 handTarget=indexTip은 검지 끝, wrist는 손목을 우선한다. 전신 관절이 없어도 손 감상은 가능하다. 손 id는 왼손·오른손이 아니다. 두 손 관계는 동시에 보인 연속 구간에서만 읽고 상대 좌표 근거 없이 교차·회전을 만들거나 화면 겹침을 접촉으로 단정하지 않는다.
-pointer는 선만 읽고 example은 합성 예시임을 감상에 밝힌다. 지표는 보조값이다. 속도는 화면 대각선 기준 초당 거리, hand 평균은 관측된 선택점의 평균이므로 한 손의 움직임을 전체 정지로 오해하지 않는다. 몸·손 자체의 크기를 역동성으로 보지 않는다.`;
+pointer는 선만 읽고 example은 합성 예시임을 감상에 밝힌다. 지표는 보조값이다. 속도는 화면 대각선 기준 초당 거리, hand 평균은 관측된 선택점의 평균이므로 한 손의 움직임을 전체 정지로 오해하지 않는다. 몸·손 자체의 크기를 역동성으로 보지 않는다.
+시각적 정의(감정 단어도 비유일 뿐이다):
+${DANCE_LABELS.map(label => `${label}:${VISUAL_DEFINITIONS[label]}`).join('\n')}`;
 
 class ApiError extends Error {
   constructor(status, code, message, diagnosticCode = code) {
@@ -69,9 +86,10 @@ const onlyKeys = (value, keys) => Object.keys(value).every(key => keys.includes(
 const invalid = () => { throw new ApiError(400, 'INVALID_MOTION', '움직임 데이터 형식이 올바르지 않습니다. 다시 기록해 주세요.'); };
 
 export function validateMotion(value) {
-  if (!isRecord(value) || !onlyKeys(value, ['source', 'handTarget', 'durationMs', 'sampleCount', 'metrics', 'samples'])) invalid();
+  if (!isRecord(value) || !onlyKeys(value, ['source', 'handTarget', 'captureAspect', 'durationMs', 'sampleCount', 'metrics', 'samples'])) invalid();
   if (!['webcam', 'hand', 'pointer', 'example'].includes(value.source) || !numberIn(value.durationMs, 1, 10000)) invalid();
   if (value.source === 'hand' ? !['indexTip', 'wrist'].includes(value.handTarget) : 'handTarget' in value) invalid();
+  if (value.captureAspect !== undefined && !numberIn(value.captureAspect, 0.2, 5)) invalid();
   if (!Array.isArray(value.samples) || value.samples.length < 2 ||
       value.samples.length > (value.source === 'hand' ? 60 : MAX_FRAMES)) invalid();
   if (!Number.isInteger(value.sampleCount) || value.sampleCount < value.samples.length || value.sampleCount > 100000) invalid();
@@ -129,6 +147,7 @@ export function validateMotion(value) {
   });
   const result = { source: value.source, durationMs: value.durationMs, sampleCount: value.sampleCount, metrics, samples };
   if (value.source === 'hand') result.handTarget = value.handTarget;
+  if (value.captureAspect !== undefined) result.captureAspect = value.captureAspect;
   return result;
 }
 
@@ -254,7 +273,7 @@ async function readBoundedJson(request, signal) {
   catch { throw new ApiError(400, 'INVALID_JSON', '움직임 데이터를 읽을 수 없습니다. 다시 기록해 주세요.'); }
 }
 
-function cleanAnalysis(value) {
+function cleanAnalysis(value, rubric) {
   if (!isRecord(value)) throw new Error('Invalid analysis');
   const text = (item, max) => {
     if (typeof item !== 'string' || !item.trim() || item.length > max) throw new Error('Invalid analysis text');
@@ -267,19 +286,23 @@ function cleanAnalysis(value) {
       .replace(/^["'“‘]|["'”’]$/g, '').trim();
     return LABEL_SET.has(plain) ? plain : LABEL_BY_SPACING.get(plain.replace(/\s/g, '')) || null;
   };
-  const impression = label(value.impression);
+  const allowedLabel = item => {
+    const normalized = label(item);
+    return normalized && rubric.eligible[normalized] !== false ? normalized : null;
+  };
+  const impression = allowedLabel(value.impression);
   if (!impression) throw new Error('Invalid vocabulary');
   const selected = Array.isArray(value.qualities) ? value.qualities
     : typeof value.qualities === 'string' ? value.qualities.split(/[,·|;]/) : [];
   // Keep only expressions the AI actually supplied. A duplicate/missing tag
   // must never trigger a fabricated third choice or discard valid prose.
-  const qualities = [...new Set([impression, ...selected.map(label).filter(Boolean)])].slice(0, 3);
+  const qualities = [...new Set([impression, ...selected.map(allowedLabel).filter(Boolean)])].slice(0, 3);
   const evidence = typeof value.observations === 'string' ? [value.observations] : value.observations;
   if (!Array.isArray(evidence) || !evidence.length || evidence.length > 10) throw new Error('Invalid observations');
   const observations = evidence.filter(item => typeof item === 'string' && item.trim())
     .map(item => text(item, 400)).slice(0, 2);
   if (!observations.length) throw new Error('Invalid observations');
-  return {
+  const result = {
     impression,
     description: text(value.description, 1200),
     observations,
@@ -287,15 +310,37 @@ function cleanAnalysis(value) {
     // A server-owned caveat remains visible even if the model omits its disclaimer.
     caveat: '움직임에서 느껴질 수 있는 시각적 인상을 설명한 것으로, 실제 감정이나 의도를 판정한 결과가 아닙니다.',
   };
+  if (Array.isArray(value.candidates)) {
+    const seen = new Set();
+    result.candidates = [];
+    for (const candidate of value.candidates.slice(0, 20)) {
+      if (!isRecord(candidate)) continue;
+      const name = allowedLabel(candidate.label);
+      if (!name || seen.has(name) || !numberIn(candidate.score, 0, 100) ||
+          typeof candidate.evidence !== 'string' || !candidate.evidence.trim() || candidate.evidence.length > 400) continue;
+      seen.add(name);
+      result.candidates.push({ label: name, score: candidate.score, evidence: candidate.evidence.trim() });
+      if (result.candidates.length === 5) break;
+    }
+  }
+  const representative = result.candidates?.find(candidate => candidate.label === impression);
+  result.rubric = {
+    ...rubric,
+    // Never change the AI's selected impression or rewrite a score to make
+    // them agree. Missing/unreported candidates have no implied score.
+    candidateRankingConsistent: representative
+      ? result.candidates.every(candidate => candidate.score <= representative.score) : null,
+  };
+  return result;
 }
 
-function readAnalysis(text) {
+function readAnalysis(text, rubric) {
   if (typeof text !== 'string') throw new Error('Missing analysis');
   const raw = text.trim();
   // Strip a single formatting wrapper only. Never repair truncated JSON,
   // extract an arbitrary substring, or invent missing response fields.
   const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return cleanAnalysis(JSON.parse(fenced ? fenced[1] : raw));
+  return cleanAnalysis(JSON.parse(fenced ? fenced[1] : raw), rubric);
 }
 
 function waitForRetry(signal) {
@@ -332,21 +377,47 @@ async function providerConfigError(response, signal) {
 // Accepts validated motion. Shared by live requests and offline size checks;
 // credentials are deliberately supplied only at the HTTP transport boundary.
 export function buildAnalysisRequest(motion, model = DEFAULT_MODEL) {
+  return analysisRequest(motion, model, evaluateExpressionRubric(motion));
+}
+
+function analysisRequest(motion, model, rubric) {
   if (!/^gemini-[a-zA-Z0-9.-]+$/.test(model)) {
     throw new ApiError(503, 'MODEL_CONFIG', '서버의 AI 모델 설정을 확인해 주세요.');
   }
+  const labels = DANCE_LABELS.filter(label => rubric.eligible[label] !== false);
+  const schema = {
+    ...OUTPUT_SCHEMA,
+    properties: {
+      ...OUTPUT_SCHEMA.properties,
+      impression: { ...OUTPUT_SCHEMA.properties.impression, enum: labels },
+      qualities: { ...OUTPUT_SCHEMA.properties.qualities, items: { type: 'STRING', enum: labels } },
+      candidates: {
+        ...OUTPUT_SCHEMA.properties.candidates,
+        items: {
+          ...OUTPUT_SCHEMA.properties.candidates.items,
+          properties: {
+            ...OUTPUT_SCHEMA.properties.candidates.items.properties,
+            label: { type: 'STRING', enum: labels },
+          },
+        },
+      },
+    },
+  };
   const generationConfig = {
     temperature: 1,
     maxOutputTokens: 1200,
     responseMimeType: 'application/json',
-    responseSchema: OUTPUT_SCHEMA,
+    responseSchema: schema,
   };
   if (model === 'gemini-2.5-flash') generationConfig.thinkingConfig = { thinkingBudget: 0 };
   if (model === DEFAULT_MODEL) generationConfig.thinkingConfig = { thinkingLevel: 'MINIMAL' };
   else if (model.startsWith('gemini-3.')) generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
   return {
     systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents: [{ role: 'user', parts: [{ text: JSON.stringify(encodeMotion(compactMotion(motion))) }] }],
+    contents: [{ role: 'user', parts: [{ text: JSON.stringify({
+      ...encodeMotion(compactMotion(motion)),
+      expressionRubric: { version: rubric.version, eligible: rubric.eligible, metrics: rubric.metrics },
+    }) }] }],
     generationConfig,
   };
 }
@@ -356,7 +427,8 @@ async function analyze(motion, env, fetchImpl, signal, remainingMs, diagnostic) 
   try {
     assertActive(signal);
     diagnostic.stage = 'prepare';
-    const body = JSON.stringify(buildAnalysisRequest(motion, model));
+    const rubric = evaluateExpressionRubric(motion);
+    const body = JSON.stringify(analysisRequest(motion, model, rubric));
     diagnostic.requestBytes = new TextEncoder().encode(body).byteLength;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     const options = {
@@ -422,7 +494,7 @@ async function analyze(motion, env, fetchImpl, signal, remainingMs, diagnostic) 
       throw new ApiError(502, 'INCOMPLETE_ANALYSIS', 'AI가 분석을 완성하지 못했습니다. 다시 시도해 주세요.');
     }
     const responseText = candidate.content?.parts?.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('');
-    try { return { provider: 'Gemini', model, analysis: readAnalysis(responseText) }; }
+    try { return { provider: 'Gemini', model, analysis: readAnalysis(responseText, rubric) }; }
     catch {
       if (candidate.finishReason === 'MAX_TOKENS') {
         throw new ApiError(502, 'INCOMPLETE_ANALYSIS', 'AI 응답이 중간에 끝났습니다. 다시 시도해 주세요.');

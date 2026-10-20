@@ -46,6 +46,20 @@
   let analysisBusy = false;
   let analysisController = null;
   let takeId = 0;
+  let videoRecorder = null;
+  let videoOptIn = false;
+  let videoAttempted = false;
+  let videoPending = false;
+  let recordedVideo = null;
+  let videoMessage = '영상 보관을 선택하지 않았어요. 의도와 AI 결과만 저장할 수 있습니다.';
+  let captureId = '';
+  let captureCreatedAt = '';
+  let logPopup = null;
+  let logOrigin = '';
+  let logPending = null;
+  let logSent = false;
+  let logSavedId = '';
+  let logMessage = '';
   let gl, program, buffer, position, color, edge, opacity;
   let lost = false;
   const STRIDE = 7;
@@ -244,7 +258,7 @@
     $('intent-count').textContent = `${Array.from($('intent-short').value).length} / 5`;
     $('intent-word').textContent = intendedFeeling || (detail ? '나만의 표현' : '선택 전');
     $('intent-summary').textContent = detail || (intendedFeeling ? '내가 이 움직임으로 표현하려던 느낌입니다.' : '표현하려던 느낌을 위에서 남겨주세요.');
-    $('feeling-note').textContent = intendedFeeling || detail ? '의도를 남겼어요. 서버로 보내지 않고 이 화면에만 보관합니다.' : '직접 적거나 표현을 골라주세요. 이 화면에만 남습니다.';
+    $('feeling-note').textContent = intendedFeeling || detail ? '의도를 남겼어요. AI에는 보내지 않으며, 로그 저장을 누르기 전까지 이 화면에만 남습니다.' : '직접 적거나 표현을 골라주세요. 로그 저장 전까지 이 화면에만 남습니다.';
     const ai = Boolean(analysis);
     $('analysis-badge').textContent = analysisBusy ? 'AI 해석 중' : ai ? 'Gemini 해석'
       : analysisState === 'error' ? '해석 불가' : isExample ? '합성 예시 · 해석 대기' : '해석 대기';
@@ -263,6 +277,20 @@
     $('analysis-observations').replaceChildren(...(analysis?.observations || []).map(text => {
       const li = document.createElement('li'); li.textContent = text; return li;
     }));
+    const candidates = (Array.isArray(analysis?.candidates) ? analysis.candidates : [])
+      .filter(item => item && typeof item.label === 'string' && typeof item.evidence === 'string' &&
+        Number.isFinite(item.score) && item.score >= 0 && item.score <= 100)
+      .slice().sort((a,b)=>b.score-a.score).slice(0,5);
+    $('analysis-candidates').hidden = !candidates.length;
+    $('candidate-list').replaceChildren(...candidates.map(item => {
+      const li = document.createElement('li');
+      const heading = document.createElement('strong');
+      heading.textContent = `${item.label} · 적합도 ${Math.round(item.score)} / 100`;
+      const evidence = document.createElement('p');
+      evidence.textContent = item.evidence;
+      li.append(heading,evidence);
+      return li;
+    }));
     $('analysis-caveat').textContent = analysis?.caveat || '';
     $('analyze-button').disabled = analysisBusy || !motionReport?.sufficient;
     $('analyze-button').textContent = analysisBusy ? '움직임을 읽고 있어요…' : ai ? 'AI로 다시 해석하기 ↗' : 'AI로 움직임 해석하기 ↗';
@@ -279,6 +307,122 @@
       $('comparison-verdict').textContent = '내 의도를 남겼어요.';
       $('comparison-explanation').textContent = 'AI 해석이 도착하면 내 표현과 나란히 비교할 수 있어요.';
     }
+    updateLogUI();
+  }
+
+  function updateLogUI() {
+    $('video-status').textContent = videoMessage;
+    $('video-capture-status').textContent = videoMessage;
+    $('video-capture-status').hidden = !videoOptIn || view !== 'drawing';
+    $('log-save-status').textContent = logMessage;
+    $('save-log').disabled = videoPending || analysisBusy || view !== 'result';
+    $('save-log').textContent = videoPending ? '영상 마무리 중…'
+      : logSavedId === captureId && captureId ? '저장한 비공개 로그 보기 ↗' : '비공개 로그에 저장 ↗';
+  }
+
+  function resetCaptureLog() {
+    videoRecorder?.abort();
+    videoRecorder = null;
+    videoOptIn = false;
+    videoAttempted = false;
+    videoPending = false;
+    recordedVideo = null;
+    videoMessage = '영상 보관을 선택하지 않았어요. 의도와 AI 결과만 저장할 수 있습니다.';
+    captureId = window.crypto?.randomUUID?.() || globalThis.crypto?.randomUUID?.() || '';
+    captureCreatedAt = new Date().toISOString();
+    logPopup = null;
+    logPending = null;
+    logSent = false;
+    logSavedId = '';
+    logMessage = '';
+  }
+
+  function resumeVideoCapture() {
+    if (!videoOptIn) return;
+    if (videoRecorder) { videoRecorder.resume(); return; }
+    if (videoAttempted) return;
+    videoAttempted = true;
+    if (!window.GhostingSessionRecorder) {
+      videoMessage = '이 브라우저에서 영상 보관을 준비하지 못했어요. 의도와 결과만 저장할 수 있습니다.';
+      updateLogUI();
+      return;
+    }
+    const id = takeId;
+    const current = new window.GhostingSessionRecorder({onState(state) {
+      if (id !== takeId || videoRecorder !== current) return;
+      videoMessage = state.message;
+      updateLogUI();
+    }});
+    videoRecorder = current;
+    if (!current.start($('camera-video').srcObject)) videoRecorder = null;
+  }
+
+  function invalidateVideoCapture(message) {
+    if (!videoOptIn || !videoAttempted) return;
+    videoRecorder?.abort();
+    videoRecorder = null;
+    recordedVideo = null;
+    videoMessage = message;
+    updateLogUI();
+  }
+
+  async function finishVideoCapture() {
+    if (!videoRecorder) return;
+    const id = takeId;
+    const current = videoRecorder;
+    const previousMessage = videoMessage;
+    videoPending = true;
+    videoMessage = '영상 보관을 마무리하고 있어요.';
+    updateLogUI();
+    let blob = null;
+    let failed = false;
+    try { blob = await current.stop(); }
+    catch (_) { failed = true; }
+    if (id !== takeId || videoRecorder !== current) return;
+    recordedVideo = blob?.size && blob.size <= 15 * 1024 * 1024 ? blob : null;
+    if (failed) videoMessage = '영상을 마무리하지 못했어요. 움직임과 분석 결과는 저장할 수 있습니다.';
+    else if (blob?.size > 15 * 1024 * 1024) videoMessage = '영상이 15MB를 넘어 보관하지 못했어요. 움직임과 분석 결과는 저장할 수 있습니다.';
+    else if (!recordedVideo && videoMessage === '영상 보관을 마무리하고 있어요.') videoMessage = previousMessage;
+    videoRecorder = null;
+    videoPending = false;
+    updateLogUI();
+  }
+
+  function logURL(capture = false) {
+    const configured = (window.JANSANG_CONFIG?.logBase || '').trim().replace(/\/+$/, '');
+    if (!configured) throw new Error('비공개 로그 서버가 아직 연결되지 않았어요.');
+    const url = new URL(configured + '/logs/');
+    if (url.protocol !== 'https:') throw new Error('비공개 로그는 HTTPS 주소에서 열어야 합니다.');
+    if (capture) url.searchParams.set('capture','1');
+    return url;
+  }
+
+  function savePrivateLog() {
+    if (view !== 'result' || videoPending || analysisBusy) return;
+    try {
+      if (!captureId) throw new Error('기록 번호를 만들지 못했어요. 최신 브라우저에서 다시 기록해 주세요.');
+      const alreadySaved = logSavedId === captureId;
+      const url = logURL(!alreadySaved);
+      if (alreadySaved) { window.open(url.href, '_blank', 'noopener,noreferrer'); return; }
+      const record = {
+        id:captureId, createdAt:captureCreatedAt, source:captureSource,
+        handTarget:captureSource === 'hand' ? handTarget : null, durationMs:duration,
+        intention:intendedFeeling, details:$('intent-detail').value,
+        analysis:analysis ? JSON.parse(JSON.stringify(analysis)) : null,
+        analysisError:analysisState === 'error' ? {code:analysisErrorCode,message:analysisMessage} : null,
+        metrics:{...(motionReport?.payload?.metrics || {})}
+      };
+      logOrigin = url.origin;
+      logPending = {record,video:recordedVideo};
+      logSent = false;
+      logPopup = window.open(url.href, 'ghosting-logbook', 'popup,width=1020,height=800');
+      if (!logPopup) throw new Error('로그 창이 차단됐어요. 팝업을 허용한 뒤 다시 저장해 주세요.');
+      logMessage = '로그 창에서 로그인하면 이번 움직임을 비공개로 저장할 수 있어요.';
+    } catch (error) {
+      logMessage = error.message;
+      logPending = null;
+    }
+    updateLogUI();
   }
 
   function analysisErrorTitle(code) {
@@ -331,7 +475,9 @@
     analysisErrorCode = '';
     analysisMessage = '';
     $('analysis-evidence').open = false;
+    $('analysis-candidates').open = false;
     if (analysisDialog.open) analysisDialog.close();
+    resetCaptureLog();
   }
 
   function analyzeMovement() {
@@ -440,8 +586,8 @@
   function refresh() {
     const hasPoints = points.length > 0;
     const result = view === 'result';
-    $('pause').disabled = lost || !hasPoints;
-    $('finish').disabled = lost || !hasPoints;
+    $('pause').disabled = lost || !hasPoints || mode === 'finalizing';
+    $('finish').disabled = lost || !hasPoints || mode === 'finalizing';
     $('start').disabled = lost;
     $('example').disabled = lost;
     $('dialog-error').hidden = !lost;
@@ -470,6 +616,7 @@
       playing:'PLAY / 당신이 남긴 리듬',
       'replay-paused':'PAUSE / 잔상을 바라보는 중',
       complete:isExample ? 'EXAMPLE / 합성 예시 움직임' : 'YOUR TRACE / 당신이 남긴 움직임',
+      finalizing:'SAVE / 영상 보관을 마무리하고 있어요',
     })[mode];
     if (isCameraInput() && view === 'drawing') {
       const hand = captureSource === 'hand';
@@ -515,6 +662,7 @@
       $('guide-title').textContent = '움직임으로 채워질 공간';
       $('guide-copy').textContent = '작은 움직임 하나면 충분해요.';
     }
+    updateLogUI();
   }
 
   function openStart() {
@@ -531,6 +679,8 @@
     if(lost) return;
     stopCamera();
     clearAnalysis();
+    videoOptIn = $('video-consent').checked;
+    if (videoOptIn) videoMessage = '기록을 시작하면 영상도 이 기기에 임시 보관합니다. 아직 온라인으로 보내지 않아요.';
     dialog.close();
     points=[];
     poseFrames=[];
@@ -553,7 +703,7 @@
     $('input-hand').setAttribute('aria-pressed', String(next === 'hand'));
     $('input-webcam').setAttribute('aria-pressed', String(next === 'webcam'));
     $('input-help').textContent = next === 'webcam'
-      ? '카메라 허용 후 자세를 잡고 시작하세요. 영상은 저장하지 않아요.'
+      ? '카메라 허용 후 자세를 잡고 시작하세요. 영상 보관 여부는 직접 선택할 수 있어요.'
       : '양손을 함께 보여주세요. 각 손의 검지 끝 또는 손목으로 공중에 그립니다.';
     $('start').firstChild.textContent = '웹캠 준비하기 ';
   }
@@ -571,6 +721,7 @@
   async function startCamera() {
     const id = takeId;
     camera?.stop();
+    invalidateVideoCapture('카메라가 다시 연결되어 이번 영상 보관을 중단했어요. 움직임과 분석 결과는 저장할 수 있습니다.');
     camera = null;
     jointTracks.clear();
     cameraKind = 'loading';
@@ -607,6 +758,7 @@
           cameraMessage = status.message;
           if (status.kind === 'error') {
             pauseRecording();
+            invalidateVideoCapture('카메라 연결이 끊겨 이번 영상을 보관하지 못했어요. 움직임과 분석 결과는 저장할 수 있습니다.');
             cameraReady = false;
             trackedHandCount = 0;
           }
@@ -676,6 +828,7 @@
       : ['leftShoulder','rightShoulder','leftHip','rightHip','leftAnkle','rightAnkle'].every(name => joints[name]);
     if (!tracked) {
       if (mode === 'recording') {
+        videoRecorder?.pause();
         elapsed = recordTime(now);
         cursor = elapsed;
         mode = 'armed';
@@ -689,6 +842,7 @@
       mode = 'recording';
       poseSegment++;
       jointTracks.clear();
+      resumeVideoCapture();
     }
     if (mode !== 'recording') return;
     const t = recordTime(now);
@@ -727,6 +881,7 @@
     cursor=elapsed;
     if(elapsed>=LIMIT) { finishRecording();return; }
     mode='paused';dirty=true;refresh();
+    videoRecorder?.pause();
     jointTracks.clear();
     announce('기록을 일시정지했습니다. 멈춘 시간은 기록에 포함되지 않습니다.');
   }
@@ -747,7 +902,7 @@
     $('result-strokes').textContent=new Set(points.map(p=>p.stroke)).size;
     $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하며 움직임의 흐름을 살펴보세요.'
       : captureSource === 'hand' ? `보이는 각 손의 ${handTargetLabel()}이 남긴 잔상입니다. 손마다 자취를 나눠 기록했어요.`
-      : '양손·양발·몸의 중심이 남긴 잔상입니다. 얼굴 좌표와 영상은 기록하지 않았어요.';
+      : '양손·양발·몸의 중심이 남긴 잔상입니다. 얼굴 좌표는 동작 분석에 포함하지 않았어요.';
     openResult();
     $('result-panel').scrollTop = 0;
     workspace.scrollTop = 0;
@@ -779,10 +934,17 @@
     if(restoreFocus) $('reopen-result').focus({preventScroll:true});
   }
 
-  function finishRecording() {
-    if(view!=='drawing' || !points.length) return;
+  async function finishRecording() {
+    if(view!=='drawing' || !points.length || mode === 'finalizing') return;
     duration=Math.max(1,recordTime());
     elapsed=duration;cursor=duration;
+    const id = takeId;
+    if (videoRecorder) {
+      mode='finalizing';
+      refresh();
+      await finishVideoCapture();
+      if (id !== takeId || view !== 'drawing') return;
+    }
     mode='complete';
     stopCamera();
     showResult();
@@ -912,6 +1074,22 @@
   $('intent-short').addEventListener('input',event=>{ if (!event.isComposing) commitIntent(); });
   $('intent-detail').addEventListener('input',updateComparison);
   $('analyze-button').addEventListener('click',requestAI);
+  $('save-log').addEventListener('click',savePrivateLog);
+  window.addEventListener('message',event=>{
+    if (!logPopup || event.source !== logPopup || event.origin !== logOrigin || !logPending) return;
+    if (event.data?.type === 'ghosting:ready' && !logSent) {
+      logSent = true;
+      logPopup.postMessage({type:'ghosting:capture',...logPending}, logOrigin);
+      logMessage = '로그 창에서 비공개 저장을 마무리하고 있어요.';
+    } else if (event.data?.type === 'ghosting:saved' && event.data.id === logPending.record.id) {
+      logSavedId = logPending.record.id;
+      logMessage = '비공개 로그에 저장했습니다.';
+      logPending = null;
+    } else if (event.data?.type === 'ghosting:error') {
+      logMessage = '비공개 로그를 저장하지 못했어요. 로그 창의 안내를 확인해 주세요.';
+    }
+    updateLogUI();
+  });
   $('export').addEventListener('click',()=>{
     if(lost || !points.length) return;
     render();
@@ -952,6 +1130,7 @@
   window.addEventListener('pagehide',()=>{
     pauseRecording();
     stopCamera();
+    videoRecorder?.abort();
     analysisController?.abort();
   });
   window.addEventListener('pageshow',event=>{
@@ -992,6 +1171,10 @@
   }
   try { setupGL(); } catch(error) { console.error('WebGL initialization:',error);failGL(); }
   new ResizeObserver(resize).observe(stage);
+  try {
+    $('log-link').href = logURL().href;
+    $('log-link').hidden = false;
+  } catch (_) { /* The log server may not yet be configured. */ }
   setView('intro');refresh();openStart();
   requestAnimationFrame(frame);
 })();

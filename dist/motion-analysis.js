@@ -415,7 +415,7 @@
       for (const [name, point] of Object.entries(frame.joints)) joints[name] = point.map((value) => round(value));
       return { t: Math.min(durationMs, round(frame.t, 3)), joints, segment: frame.segment };
     });
-    const payload = { source, durationMs, sampleCount: sampleData.length, metrics, samples };
+    const payload = { source, durationMs, captureAspect: aspect, sampleCount: sampleData.length, metrics, samples };
     if (source === 'hand') payload.handTarget = handTarget;
     return {
       payload,

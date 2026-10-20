@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#111b20">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Ghosting — 나의 움직임 기록</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Ghosting 기록 첫 화면">Ghosting<span class="brand-dot" aria-hidden="true"></span></a>
+      <span class="eyebrow">A PRIVATE MOVEMENT LOG</span>
+      <button id="logout" class="button quiet" type="button" hidden>로그아웃</button>
+    </header>
+
+    <section id="login-panel" class="login-panel" aria-labelledby="login-heading">
+      <p class="eyebrow">ONLY FOR YOU</p>
+      <h1 id="login-heading">움직임을 다시,<br><em>바라보는 곳.</em></h1>
+      <p class="lead">내가 남긴 움직임과 AI가 읽은 인상을<br>나만의 기록으로 모아봅니다.</p>
+      <form id="login-form" class="login-form">
+        <label for="password">개인 기록함 비밀번호</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="비밀번호 입력" maxlength="256">
+        <button id="login-submit" class="button primary" type="submit">기록함 열기 <span aria-hidden="true">↗</span></button>
+      </form>
+      <p id="login-status" class="status" role="status" aria-live="polite">로그인 상태를 확인하고 있어요.</p>
+      <button id="session-retry" class="text-button" type="button" hidden>연결 다시 확인</button>
+      <p class="privacy-note">개인 비밀번호로 여는 비공개 기록함입니다.<br>로그인 전에는 영상과 분석 기록을 표시하지 않습니다.</p>
+    </section>
+
+    <section id="workspace" hidden aria-label="나의 움직임 기록">
+      <div class="page-heading">
+        <div><p class="eyebrow">MOVEMENTS, REVISITED</p><h1>나의 움직임 기록</h1></div>
+        <p>같은 움직임을, 다른 시선으로.<br>영상과 AI의 표현을 함께 돌아보세요.</p>
+      </div>
+      <p id="workspace-status" class="status" role="status" aria-live="polite"></p>
+      <section id="capture-notice" class="capture-notice" hidden aria-label="새 기록 저장">
+        <div><strong id="capture-heading">움직임을 기다리고 있어요.</strong><p id="capture-message">원래 Ghosting 화면에서 기록을 보내주세요.</p></div>
+        <button id="review-capture" class="button" type="button" hidden>저장 전 확인</button>
+      </section>
+      <div class="workspace-grid">
+        <aside class="library">
+          <div class="section-heading"><h2>기록들 <span id="record-count" class="count">0</span></h2><button id="refresh" class="text-button" type="button">새로고침</button></div>
+          <p id="list-status" class="muted" role="status"></p>
+          <p id="storage-status" class="fine-print"></p>
+          <div id="record-list" class="record-list" aria-label="저장한 기록 목록"></div>
+          <section id="distribution-panel" class="distribution" hidden aria-labelledby="distribution-heading">
+            <p class="eyebrow">WORDS THAT RETURN</p>
+            <h3 id="distribution-heading">자주 남은 인상</h3>
+            <p class="fine-print">저장된 대표 인상의 빈도입니다.<br>감정의 분포나 표현의 정답률은 아닙니다.</p>
+            <div id="distribution-list"></div>
+          </section>
+        </aside>
+        <section class="detail-panel" aria-label="선택한 기록">
+          <div id="empty-state" class="empty-state"><span class="empty-orbit" aria-hidden="true"></span><h2>하나의 움직임을 골라보세요.</h2><p>영상 속 움직임과 그 곁에 남은 표현을<br>여기에서 함께 볼 수 있어요.</p></div>
+          <article id="record-detail" hidden>
+            <div class="detail-heading"><div><p id="detail-meta" class="eyebrow"></p><h2 id="detail-title"></h2></div><span id="detail-badge" class="badge"></span></div>
+            <div id="video-panel" class="video-panel" hidden><video id="record-video" controls playsinline preload="metadata"></video><p id="video-status" class="fine-print" role="status"></p><button id="retry-video" class="text-button" type="button" hidden>영상 다시 열기</button></div>
+            <p id="no-video" class="no-video" hidden>이 기록에는 저장된 영상이 없습니다.</p>
+            <section class="comparison" aria-label="의도와 AI 인상 비교">
+              <div><p class="eyebrow">MY INTENTION</p><h3 id="detail-intention"></h3><p id="detail-notes" class="muted"></p></div>
+              <div><p class="eyebrow">AI IMPRESSION</p><h3 id="detail-impression"></h3><div id="detail-qualities" class="tags"></div></div>
+            </section>
+            <p id="analysis-error" class="error-note" hidden></p>
+            <p id="detail-description" class="description"></p>
+            <ul id="detail-observations" class="observations"></ul>
+            <section class="candidate-section" aria-labelledby="candidates-heading">
+              <div class="section-heading"><h3 id="candidates-heading">AI가 함께 제시한 표현</h3><span class="badge">적합도 / 100</span></div>
+              <p class="fine-print">각 수치는 AI가 스스로 보고한 표현의 적합도입니다. 확률·정확도·모델 내부의 실제 후보 순위가 아닙니다. 보고하지 않은 수치는 0으로 표시하지 않습니다.</p>
+              <p id="ranking-note" class="error-note" hidden>AI가 고른 대표 인상과 가장 높은 적합도의 표현이 다릅니다. 보고된 내용을 그대로 표시했습니다.</p>
+              <div id="candidate-list" class="candidate-list"></div>
+            </section>
+            <details class="metrics-section"><summary>기록 정보 보기</summary><dl id="detail-metrics" class="metrics"></dl><section id="rubric-panel" hidden><h3>표현 기준 참고</h3><p id="rubric-note" class="fine-print"></p><p id="rubric-eligibility" class="fine-print"></p><dl id="rubric-metrics" class="metrics"></dl></section></details>
+            <div id="pending-actions" class="record-actions" hidden><p class="fine-print">저장하면 이 기록함에 원본 영상과 분석 정보가 업로드됩니다. 새로고침하거나 창을 닫으면 저장 전 데이터가 사라집니다.</p><div><button id="save-capture" class="button primary" type="button">이 기록 저장하기</button><button id="discard-capture" class="button quiet" type="button">저장 취소</button></div></div>
+            <div id="saved-actions" class="record-actions" hidden><div><button id="download-json" class="button" type="button">분석 JSON 다운로드</button><button id="download-video" class="button" type="button" hidden>영상 다운로드</button><button id="delete-record" class="text-button danger" type="button">기록 삭제</button></div></div>
+            <p id="detail-status" class="status" role="status" aria-live="polite"></p>
+          </article>
+        </section>
+      </div>
+    </section>
+    <footer>Ghosting <span aria-hidden="true">·</span> 움직임은 지나가고, 인상은 남습니다.</footer>
+  </main>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-heading">
+    <p class="eyebrow">ONE MORE MOMENT</p><h2 id="confirm-heading"></h2><p id="confirm-message" class="muted"></p>
+    <div class="dialog-actions"><button id="confirm-cancel" class="button quiet" type="button">돌아가기</button><button id="confirm-accept" class="button danger-button" type="button">삭제하기</button></div>
+  </dialog>
+</body>
+</html>

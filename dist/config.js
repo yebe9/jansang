@@ -3,5 +3,6 @@
    로컬 node server.cjs: 공개 apiBase 값과 관계없이 같은 로컬 서버의 /api/*를 사용합니다.
    apiBase에는 공개 서버의 HTTPS 주소만 사용합니다. */
 window.JANSANG_CONFIG = Object.freeze({
-  apiBase: 'https://jansang-motion-api.jansang.workers.dev'
+    apiBase: 'https://jansang-motion-api.jansang.workers.dev',
+    logBase: 'https://ghosting-logbook.jansang.workers.dev'
 });

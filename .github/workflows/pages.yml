@@ -29,7 +29,7 @@ jobs:
           node-version: '22'
       - name: Check JavaScript syntax
         run: |
-          for file in dist/*.js api/*.mjs server.cjs; do node --check "$file"; done
+          for file in dist/*.js api/*.mjs logbook/*.mjs logbook/public/*.js server.cjs; do node --check "$file"; done
       - name: Test motion and API boundaries
         run: node --test tests/*.test.cjs
       - name: Configure Pages
