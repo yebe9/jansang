@@ -240,12 +240,15 @@ test('virtual default camera switches to a normal physical camera before playbac
   const virtual = cameraStream('Mirametrix Virtual Camera', 'virtual');
   const physical = cameraStream('LGE Camera', 'physical');
   const requests = [];
-  f.context.navigator.mediaDevices.enumerateDevices = async () => [
-    { kind: 'videoinput', deviceId: 'virtual', label: virtual.track.label },
-    { kind: 'videoinput', deviceId: 'ir', label: 'LGE IR-FHD Camera' },
-    { kind: 'videoinput', deviceId: 'physical', label: physical.track.label },
-    { kind: 'audioinput', deviceId: 'microphone', label: 'Microphone' }
-  ];
+  let enumerations = 0;
+  f.context.navigator.mediaDevices.enumerateDevices = async () => ++enumerations === 1
+    ? [{ kind: 'videoinput', deviceId: 'virtual', label: '' }]
+    : [
+      { kind: 'videoinput', deviceId: 'virtual', label: virtual.track.label },
+      { kind: 'videoinput', deviceId: 'ir', label: 'LGE IR-FHD Camera' },
+      { kind: 'videoinput', deviceId: 'physical', label: physical.track.label },
+      { kind: 'audioinput', deviceId: 'microphone', label: 'Microphone' }
+    ];
   f.context.navigator.mediaDevices.getUserMedia = async constraints => {
     requests.push(constraints);
     if (requests.length === 1) return virtual.stream;
@@ -263,6 +266,156 @@ test('virtual default camera switches to a normal physical camera before playbac
   f.camera.stop();
   assert.equal(physical.track.stopped, 1);
   assert.equal(virtual.track.stopped, 1);
+});
+
+test('known physical camera opens directly without touching virtual or infrared inputs', async () => {
+  const f = fixture();
+  const physical = cameraStream('LGE Camera', 'physical');
+  const requests = [];
+  f.context.navigator.mediaDevices.enumerateDevices = async () => [
+    { kind: 'videoinput', deviceId: 'virtual', label: 'Mirametrix Virtual Camera' },
+    { kind: 'videoinput', deviceId: 'ir', label: 'LGE IR-FHD Camera' },
+    { kind: 'videoinput', deviceId: 'physical', label: physical.track.label }
+  ];
+  f.context.navigator.mediaDevices.getUserMedia = async constraints => {
+    requests.push(constraints);
+    return physical.stream;
+  };
+  assert.equal(await f.camera.start(), true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].video.deviceId.exact, 'physical');
+  assert.equal(requests[0].audio, false);
+  assert.equal(f.video.srcObject, physical.stream);
+  assert.equal(f.deviceReports[0].selectedDeviceId, 'physical');
+  f.camera.stop();
+  assert.equal(physical.track.stopped, 1);
+});
+
+test('unreadable default recovers through physical labels revealed after the failed open', async () => {
+  const f = fixture();
+  const physical = cameraStream('LGE Camera', 'physical');
+  const requests = [];
+  let enumerations = 0;
+  f.context.navigator.mediaDevices.enumerateDevices = async () => ++enumerations === 1
+    ? [{ kind: 'videoinput', deviceId: 'default', label: '' }]
+    : [
+      { kind: 'videoinput', deviceId: 'virtual', label: 'Mirametrix Virtual Camera' },
+      { kind: 'videoinput', deviceId: 'ir', label: 'LGE IR-FHD Camera' },
+      { kind: 'videoinput', deviceId: 'physical', label: physical.track.label }
+    ];
+  f.context.navigator.mediaDevices.getUserMedia = async constraints => {
+    requests.push(constraints);
+    if (!constraints.video.deviceId) throw new DOMException('Default unavailable', 'NotReadableError');
+    assert.equal(constraints.video.deviceId.exact, 'physical');
+    return physical.stream;
+  };
+  assert.equal(await f.camera.start(), true);
+  assert.equal(requests.length, 2);
+  assert.equal(f.video.srcObject, physical.stream);
+  assert.equal(f.deviceReports[0].selectedDeviceId, 'physical');
+  assert.equal(f.deviceReports[0].devices.length, 3);
+  assert.equal(f.statuses.at(-1).kind, 'ready');
+  f.camera.stop();
+});
+
+test('all unreadable cameras leave a manual list and automatic retries remain automatic', async () => {
+  const f = fixture();
+  const requests = [];
+  f.context.navigator.mediaDevices.enumerateDevices = async () => [
+    { kind: 'videoinput', deviceId: 'virtual', label: 'Mirametrix Virtual Camera' },
+    ...Array.from({ length: 5 }, (_, index) =>
+      ({ kind: 'videoinput', deviceId: `physical-${index}`, label: `USB Camera ${index}` }))
+  ];
+  f.context.navigator.mediaDevices.getUserMedia = async constraints => {
+    requests.push(constraints.video.deviceId.exact);
+    throw new DOMException('Unavailable', 'NotReadableError');
+  };
+  await assert.rejects(f.camera.start(), /카메라 영상을 시작하지 못했어요/);
+  assert.deepEqual(requests, ['physical-0', 'physical-1', 'physical-2'],
+    'Only the preferred camera and at most two physical alternatives are attempted');
+  assert.equal(f.deviceReports.length, 1);
+  assert.equal(f.deviceReports[0].devices.length, 6);
+  assert.equal(f.deviceReports[0].selectedDeviceId, '');
+  assert.equal(f.statuses.at(-1).kind, 'error');
+  assert.equal(f.video.srcObject, null);
+  assert.equal(f.scheduled.size, 0);
+});
+
+test('permission or security denial never triggers a camera fallback', async () => {
+  for (const name of ['NotAllowedError', 'SecurityError']) {
+    const f = fixture();
+    let requests = 0;
+    f.context.navigator.mediaDevices.enumerateDevices = async () => [
+      { kind: 'videoinput', deviceId: 'physical', label: 'LGE Camera' },
+      { kind: 'videoinput', deviceId: 'other', label: 'USB Camera' }
+    ];
+    f.context.navigator.mediaDevices.getUserMedia = async () => {
+      requests++;
+      throw new DOMException('Denied', name);
+    };
+    await assert.rejects(f.camera.start(), /권한|차단/);
+    assert.equal(requests, 1);
+    assert.equal(f.statuses.at(-1).kind, 'error');
+    assert.equal(f.video.srcObject, null);
+  }
+});
+
+test('explicit unreadable camera stays selected without opening any substitute', async () => {
+  const f = fixture();
+  const requests = [];
+  f.context.navigator.mediaDevices.enumerateDevices = async () => [
+    { kind: 'videoinput', deviceId: 'chosen', label: 'OBS Virtual Camera' },
+    { kind: 'videoinput', deviceId: 'physical', label: 'LGE Camera' }
+  ];
+  f.context.navigator.mediaDevices.getUserMedia = async constraints => {
+    requests.push(constraints.video.deviceId.exact);
+    throw new DOMException('Unavailable', 'NotReadableError');
+  };
+  await assert.rejects(f.camera.start({ deviceId: 'chosen' }), /카메라 영상을 시작하지 못했어요/);
+  assert.deepEqual(requests, ['chosen']);
+  assert.equal(f.deviceReports[0].selectedDeviceId, 'chosen');
+  assert.equal(f.deviceReports[0].devices.length, 2);
+});
+
+test('cancellation during initial enumeration never opens or reports a camera', async () => {
+  const f = fixture();
+  const enumeration = deferred();
+  let requests = 0;
+  f.context.navigator.mediaDevices.enumerateDevices = () => enumeration.promise;
+  f.context.navigator.mediaDevices.getUserMedia = async () => { requests++; return f.stream; };
+  const pending = f.camera.start();
+  f.camera.stop();
+  assert.equal(await pending, false);
+  enumeration.resolve([{ kind: 'videoinput', deviceId: 'physical', label: 'LGE Camera' }]);
+  await new Promise(setImmediate);
+  assert.equal(requests, 0);
+  assert.equal(f.deviceReports.length, 0);
+  assert.equal(f.video.srcObject, null);
+  assert.equal(f.scheduled.size, 0);
+});
+
+test('cancelled fallback releases a late physical stream without starting detection', async () => {
+  const f = fixture();
+  const replacement = deferred();
+  const physical = cameraStream('LGE Camera', 'physical');
+  let enumerations = 0, requests = 0;
+  f.context.navigator.mediaDevices.enumerateDevices = async () => ++enumerations === 1 ? [] : [
+    { kind: 'videoinput', deviceId: 'physical', label: physical.track.label }
+  ];
+  f.context.navigator.mediaDevices.getUserMedia = () => ++requests === 1
+    ? Promise.reject(new DOMException('Default unavailable', 'NotReadableError'))
+    : replacement.promise;
+  const pending = f.camera.start();
+  await new Promise(setImmediate);
+  assert.equal(requests, 2);
+  f.camera.stop();
+  assert.equal(await pending, false);
+  replacement.resolve(physical.stream);
+  await new Promise(setImmediate);
+  assert.equal(physical.track.stopped, 1);
+  assert.equal(f.deviceReports.length, 0);
+  assert.equal(f.video.srcObject, null);
+  assert.equal(f.scheduled.size, 0);
 });
 
 test('explicit camera selection is exact and is never automatically replaced', async () => {
@@ -292,8 +445,8 @@ test('cancelling during physical camera replacement releases the late stream', a
   f.track.label = 'Mirametrix Virtual Camera';
   const physical = cameraStream('LGE Camera', 'physical');
   const replacement = deferred();
-  let requests = 0;
-  f.context.navigator.mediaDevices.enumerateDevices = async () => [
+  let requests = 0, enumerations = 0;
+  f.context.navigator.mediaDevices.enumerateDevices = async () => ++enumerations === 1 ? [] : [
     { kind: 'videoinput', deviceId: 'physical', label: physical.track.label }
   ];
   f.context.navigator.mediaDevices.getUserMedia = () =>

@@ -99,6 +99,11 @@
 
   const isVirtualCamera = label => /mirametrix|virtual|\bobs\b/i.test(label || '');
   const isInfraredCamera = label => /\bir\b|infrared|depth/i.test(label || '');
+  const isPhysicalCamera = device => device.label &&
+    !isVirtualCamera(device.label) && !isInfraredCamera(device.label);
+  const canTryAnotherCamera = error => [
+    'NotReadableError', 'TrackStartError', 'NotFoundError', 'DevicesNotFoundError'
+  ].includes(error?.name);
 
   function closeDetector(detector) {
     if (detector) {
@@ -116,7 +121,7 @@
         return '연결된 카메라를 찾지 못했어요. 카메라 연결을 확인한 뒤 다시 시작해 주세요.';
       case 'NotReadableError':
       case 'TrackStartError':
-        return '카메라를 열지 못했어요. 카메라를 사용 중인 다른 앱을 닫고 다시 시작해 주세요.';
+        return '카메라 영상을 시작하지 못했어요. 다른 앱의 카메라 사용 여부를 확인하거나, 목록에서 다른 카메라를 선택해 주세요.';
       case 'OverconstrainedError':
         return '이 카메라에서는 요청한 영상 설정을 사용할 수 없어요. 다른 카메라나 브라우저를 사용해 주세요.';
       case 'SecurityError':
@@ -201,32 +206,76 @@
           this._stream = stream;
           return stream;
         };
-        let stream = await openStream(deviceId);
         let devices = [];
-        if (navigator.mediaDevices.enumerateDevices) {
+        const readDevices = async () => {
+          if (!navigator.mediaDevices.enumerateDevices) return;
           try {
             const inputs = await cancellable(navigator.mediaDevices.enumerateDevices(), controller.signal);
+            if (!current()) throw abortError();
             devices = inputs.filter(device => device.kind === 'videoinput' && device.deviceId)
               .map(({ deviceId, label }) => ({ deviceId, label }));
           } catch (error) {
             if (!current()) throw error;
             // Some embedded browsers allow capture but do not list devices.
           }
-        }
-        const initialTrack = stream.getVideoTracks()[0];
-        let selectedId = deviceId || initialTrack?.getSettings?.().deviceId || '';
-        if (!deviceId && isVirtualCamera(initialTrack?.label)) {
-          const physical = devices.find(device => device.label && device.deviceId !== selectedId &&
-            !isVirtualCamera(device.label) && !isInfraredCamera(device.label));
-          if (physical) {
-            // A virtual camera can supply a "camera off" image as valid frames.
-            // Release it before opening the real camera it may itself depend on.
-            stopTracks(stream);
-            this._stream = null;
-            this._emitStatus('loading', '실제 카메라로 연결하고 있어요.');
-            stream = await openStream(physical.deviceId);
-            selectedId = physical.deviceId;
+        };
+        // An already-permitted device list can identify the real webcam before
+        // opening a broken virtual default. Before permission, labels may be blank.
+        if (navigator.mediaDevices.enumerateDevices) await readDevices();
+        const preferred = !deviceId && devices.find(isPhysicalCamera);
+        let selectedId = deviceId || preferred?.deviceId || '';
+        let stream;
+        const attemptedIds = new Set();
+        const tryOpen = async id => {
+          if (id) attemptedIds.add(id);
+          return openStream(id);
+        };
+        try {
+          try {
+            stream = await tryOpen(selectedId);
+          } catch (error) {
+            if (!current() || deviceId || !canTryAnotherCamera(error)) throw error;
+            // Permission may reveal labels even when the browser's default
+            // camera cannot start. Try at most two known physical alternatives.
+            await readDevices();
+            const alternatives = devices.filter(device => isPhysicalCamera(device) &&
+              !attemptedIds.has(device.deviceId)).slice(0, 2);
+            let lastError = error;
+            for (const alternative of alternatives) {
+              this._emitStatus('loading', '다른 실제 카메라로 연결하고 있어요.');
+              try {
+                stream = await tryOpen(alternative.deviceId);
+                selectedId = alternative.deviceId;
+                break;
+              } catch (nextError) {
+                lastError = nextError;
+                if (!current() || !canTryAnotherCamera(nextError)) throw nextError;
+              }
+            }
+            if (!stream) throw lastError;
           }
+          await readDevices();
+          const initialTrack = stream.getVideoTracks()[0];
+          selectedId = initialTrack?.getSettings?.().deviceId || selectedId;
+          if (!deviceId && isVirtualCamera(initialTrack?.label)) {
+            const physical = devices.find(device => device.deviceId !== selectedId &&
+              !attemptedIds.has(device.deviceId) && isPhysicalCamera(device));
+            if (physical) {
+              // A virtual camera can supply a "camera off" image as valid frames.
+              // Release it before opening the real camera it may itself depend on.
+              stopTracks(stream);
+              this._stream = null;
+              this._emitStatus('loading', '실제 카메라로 연결하고 있어요.');
+              stream = await tryOpen(physical.deviceId);
+              selectedId = physical.deviceId;
+            }
+          }
+        } catch (error) {
+          if (!current()) throw error;
+          // Keep manual selection available even when every open attempt fails.
+          // A failed automatic choice must remain automatic on the next retry.
+          if (devices.length) this.onDevices({ devices, selectedDeviceId: deviceId || '' });
+          throw error;
         }
         const selectedTrack = stream.getVideoTracks()[0];
         selectedId = selectedTrack?.getSettings?.().deviceId || selectedId ||
