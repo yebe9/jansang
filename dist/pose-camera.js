@@ -1,7 +1,7 @@
-/* Webcam pose input for JANSANG.
+/* Webcam hand / full-body input for JANSANG.
  *
  * Usage:
- *   const camera = new JansangPoseCamera({ video, overlay, onFrame, onStatus, onDevices });
+ *   const camera = new JansangPoseCamera({ video, overlay, trackingMode: 'hand', onFrame, onStatus, onDevices });
  *   await camera.start({ deviceId }); // optional exact camera; true when ready
  *   camera.stop();        // releases webcam tracks and the detector immediately
  *
@@ -9,10 +9,16 @@
  * Both should fill the same box. This module uses object-fit: contain, mirrors
  * the video, and paints the matching mirrored skeleton into the overlay.
  * onFrame({ landmarks, timestamp }): <= 15 callbacks/sec, performance.now() in ms;
- * landmarks is a fresh array in MediaPipe's 33-slot index order. Slots 0–10
+ * trackingMode is 'body' (default) or 'hand'. For body, landmarks is a fresh
+ * array in MediaPipe's 33-slot index order. Slots 0–10
  * (face) are always null; slots 11–32 contain { x, y, z, visibility } for the
  * body. x is mirrored; x/y are clamped to [0, 1]. Missing shoulders, hips, or
  * ankles produce []. Consumers must check each joint's visibility >= 0.5.
+ * For hand, landmarks uses 21 hand slots (0 wrist, 8 index fingertip), without
+ * any body or face points. Hand models do not return per-joint visibility:
+ * this adapter sets visibility to 1 for finite in-frame points, otherwise 0.
+ * Missing wrist/index MCP/index tip, a confident handedness switch, or a large
+ * wrist discontinuity produces [] so consumers can start a separate stroke.
  * onStatus({ kind, message }): loading | ready | tracking | missing | error.
  * onDevices({ devices, selectedDeviceId }): video inputs after permission;
  * devices contains only { deviceId, label }. Selection stays in this session.
@@ -20,20 +26,22 @@
  * stop() is idempotent, including during pending permission or model downloads.
  *
  * Frames stay in the browser. No video recording, audio, upload, or storage.
- * MediaPipe internally estimates 33 landmarks, including the face. Facial
+ * In body mode MediaPipe internally estimates 33 landmarks, including the face. Facial
  * coordinates are discarded before smoothing, drawing, or onFrame callbacks.
  * This module only downloads the public library/WASM/model assets below.
  * MediaPipe Tasks Vision is Apache-2.0:
  * https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE
  * API: https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker/web_js
- * Synchronous inference is throttled on the main thread, using the Full model
+ * API: https://developers.google.com/edge/mediapipe/solutions/vision/hand_landmarker/web_js
+ * Synchronous inference is throttled on the main thread, using the Full pose model
  * and a small camera frame. A worker is a future performance improvement.
  */
 (() => {
   'use strict';
 
   const PACKAGE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32';
-  const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task';
+  const BODY_MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task';
+  const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
   const FRAME_INTERVAL = 1000 / 15;
   const MIN_VISIBILITY = 0.5;
   const BODY_CONNECTIONS = [
@@ -43,6 +51,13 @@
     [11, 23], [12, 24], [23, 24], [23, 25], [25, 27],
     [24, 26], [26, 28], [27, 29], [29, 31], [27, 31],
     [28, 30], [30, 32], [28, 32]
+  ];
+  const HAND_CONNECTIONS = [
+    [0, 1], [1, 2], [2, 3], [3, 4],
+    [0, 5], [5, 6], [6, 7], [7, 8],
+    [5, 9], [9, 10], [10, 11], [11, 12],
+    [9, 13], [13, 14], [14, 15], [15, 16],
+    [13, 17], [0, 17], [17, 18], [18, 19], [19, 20]
   ];
   const clamp = value => Math.max(0, Math.min(1, value));
   let visionPromise;
@@ -98,7 +113,7 @@
         return '카메라 권한이 꺼져 있어요. 브라우저의 카메라 권한을 허용한 뒤 다시 시작해 주세요.';
       case 'NotFoundError':
       case 'DevicesNotFoundError':
-        return '연결된 카메라를 찾지 못했어요. 카메라를 연결하거나 마우스로 그려 주세요.';
+        return '연결된 카메라를 찾지 못했어요. 카메라 연결을 확인한 뒤 다시 시작해 주세요.';
       case 'NotReadableError':
       case 'TrackStartError':
         return '카메라를 열지 못했어요. 카메라를 사용 중인 다른 앱을 닫고 다시 시작해 주세요.';
@@ -114,10 +129,12 @@
   }
 
   class JansangPoseCamera {
-    constructor({ video, overlay, onFrame = () => {}, onStatus = () => {}, onDevices = () => {} }) {
+    constructor({ video, overlay, trackingMode = 'body', onFrame = () => {}, onStatus = () => {}, onDevices = () => {} }) {
       if (!video || !overlay) throw new Error('카메라 미리보기 요소가 필요해요.');
+      if (!['hand', 'body'].includes(trackingMode)) throw new Error('손 또는 전신 인식 모드를 선택해 주세요.');
       this.video = video;
       this.overlay = overlay;
+      this.trackingMode = trackingMode;
       this.context = overlay.getContext('2d');
       this.onFrame = onFrame;
       this.onStatus = onStatus;
@@ -129,6 +146,7 @@
       this._controller = null;
       this._trackListeners = [];
       this._smoothed = null;
+      this._handIdentity = null;
       this._status = '';
       this._lastPoseTime = -Infinity;
       this._lastInference = -Infinity;
@@ -233,7 +251,7 @@
           '카메라 영상을 재생하지 못했어요. 브라우저의 카메라 권한을 확인한 뒤 다시 시작해 주세요.');
         if (!current()) return false;
 
-        this._emitStatus('loading', '동작 인식 모델을 불러오는 중이에요. 처음에는 잠시 걸릴 수 있어요.');
+        this._emitStatus('loading', `${this.trackingMode === 'hand' ? '손' : '동작'} 인식 모델을 불러오는 중이에요. 처음에는 잠시 걸릴 수 있어요.`);
         const detectorPromise = this._createDetector(current);
         detectorPromise.then(detector => { if (!current()) closeDetector(detector); }, () => {});
         const detector = await cancellable(detectorPromise, controller.signal, 90000,
@@ -243,7 +261,9 @@
         this._lastInference = -Infinity;
         this._lastVideoTime = -1;
         this._stalled = false;
-        this._emitStatus('ready', '카메라가 준비됐어요. 얼굴은 포함하지 않아도 돼요. 어깨부터 발끝까지 화면 안에 들어오도록 서 주세요.');
+        this._emitStatus('ready', this.trackingMode === 'hand'
+          ? '카메라가 준비됐어요. 한 손의 손목부터 손가락 끝까지 화면 안에 보여 주세요.'
+          : '카메라가 준비됐어요. 얼굴은 포함하지 않아도 돼요. 어깨부터 발끝까지 화면 안에 들어오도록 서 주세요.');
         if (!current()) return false;
         this._raf = requestAnimationFrame(timestamp => this._tick(timestamp, generation));
         return true;
@@ -257,26 +277,34 @@
     }
 
     async _createDetector(current) {
-      const { FilesetResolver, PoseLandmarker } = await loadVision();
+      const { FilesetResolver, PoseLandmarker, HandLandmarker } = await loadVision();
       if (!current()) throw abortError();
       const fileset = await FilesetResolver.forVisionTasks(`${PACKAGE}/wasm`);
       if (!current()) throw abortError();
+      const hand = this.trackingMode === 'hand';
+      const Detector = hand ? HandLandmarker : PoseLandmarker;
       const options = {
-        baseOptions: { modelAssetPath: MODEL, delegate: 'GPU' },
+        baseOptions: { modelAssetPath: hand ? HAND_MODEL : BODY_MODEL, delegate: 'GPU' },
         runningMode: 'VIDEO',
-        numPoses: 1,
-        minPoseDetectionConfidence: 0.55,
-        minPosePresenceConfidence: 0.55,
         minTrackingConfidence: 0.55,
-        outputSegmentationMasks: false
+        ...(hand ? {
+          numHands: 1,
+          minHandDetectionConfidence: 0.55,
+          minHandPresenceConfidence: 0.55
+        } : {
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.55,
+          minPosePresenceConfidence: 0.55,
+          outputSegmentationMasks: false
+        })
       };
       try {
-        return await PoseLandmarker.createFromOptions(fileset, options);
+        return await Detector.createFromOptions(fileset, options);
       } catch (error) {
         if (!current()) throw abortError();
         // Some devices cannot create a second GPU context alongside WebGL art.
         options.baseOptions.delegate = 'CPU';
-        return PoseLandmarker.createFromOptions(fileset, options);
+        return Detector.createFromOptions(fileset, options);
       }
     }
 
@@ -290,18 +318,23 @@
         let result;
         try {
           result = this._detector.detectForVideo(this.video, timestamp);
-          const landmarks = this._filterPose(result.landmarks[0], timestamp);
+          const hand = this.trackingMode === 'hand';
+          const landmarks = hand
+            ? this._filterHand(result.landmarks?.[0], timestamp, result.handedness?.[0]?.[0])
+            : this._filterPose(result.landmarks?.[0], timestamp);
           this._draw(landmarks);
           this._emitStatus(landmarks.length ? 'tracking' : 'missing',
             landmarks.length
-              ? '온몸의 움직임을 보고 있어요. 어깨부터 발끝까지 화면 안에서 자유롭게 움직여 주세요.'
-              : '몸 전체를 찾고 있어요. 얼굴은 필요 없어요. 어깨·골반·발목이 보이도록 한 걸음 물러나 주세요.');
+              ? (hand ? '손의 움직임을 보고 있어요. 한 손의 손가락과 손목을 자유롭게 움직여 주세요.'
+                : '온몸의 움직임을 보고 있어요. 어깨부터 발끝까지 화면 안에서 자유롭게 움직여 주세요.')
+              : (hand ? '손을 찾고 있어요. 한 손의 손목과 검지 끝이 카메라 안에 보이도록 해 주세요.'
+                : '몸 전체를 찾고 있어요. 얼굴은 필요 없어요. 어깨·골반·발목이 보이도록 한 걸음 물러나 주세요.'));
           // Consumer may call stop() (e.g. after its ten-second recording).
           if (generation === this._generation) this.onFrame({ landmarks, timestamp });
         } catch (_) {
           if (generation === this._generation) {
             this.stop();
-            this._emitStatus('error', '동작 인식이 중단됐어요. 카메라를 다시 시작하거나 마우스로 그려 주세요.');
+            this._emitStatus('error', '동작 인식이 중단됐어요. 카메라를 다시 시작해 주세요.');
           }
         } finally {
           if (result?.close) result.close();
@@ -312,6 +345,7 @@
         // clock rather than counting frozen video as observed movement.
         this._stalled = true;
         this._smoothed = null;
+        this._handIdentity = null;
         this._draw([]);
         this._emitStatus('missing', '카메라 영상을 기다리고 있어요. 다른 앱에서 카메라를 사용 중인지 확인해 주세요.');
         if (generation === this._generation) this.onFrame({ landmarks: [], timestamp });
@@ -363,6 +397,46 @@
       return smoothed.map(point => point ? { ...point } : null);
     }
 
+    _filterHand(raw, timestamp, handedness) {
+      const valid = point => point && Number.isFinite(point.x) && Number.isFinite(point.y) &&
+        point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1;
+      if (!raw || raw.length < 21 || ![0, 5, 8].every(index => valid(raw[index]))) {
+        this._smoothed = null;
+        this._handIdentity = null;
+        return [];
+      }
+      // Handedness confidence describes left/right, not point visibility. It is
+      // useful only for detecting a likely hand swap, never as joint confidence.
+      const identity = handedness?.score >= 0.75 &&
+        ['Left', 'Right'].includes(handedness.categoryName) ? handedness.categoryName : null;
+      const previous = timestamp - this._lastPoseTime < 300 ? this._smoothed : null;
+      const swapped = previous && identity && this._handIdentity && identity !== this._handIdentity;
+      const jumped = previous && Math.hypot(1 - raw[0].x - previous[0].x, raw[0].y - previous[0].y) > 0.4;
+      if (identity) this._handIdentity = identity;
+      if (swapped || jumped) {
+        this._smoothed = null;
+        return [];
+      }
+      const smoothed = Array.from({ length: 21 }, (_, index) => {
+        const landmark = raw[index];
+        const visibility = valid(landmark) ? 1 : 0;
+        const x = visibility ? 1 - landmark.x : 0.5;
+        const y = visibility ? landmark.y : 0.5;
+        const z = Number.isFinite(landmark?.z) ? landmark.z : 0;
+        const last = previous?.[index];
+        const alpha = last && last.visibility && visibility ? 0.65 : 1;
+        return {
+          x: last ? last.x + alpha * (x - last.x) : x,
+          y: last ? last.y + alpha * (y - last.y) : y,
+          z: last ? last.z + alpha * (z - last.z) : z,
+          visibility
+        };
+      });
+      this._lastPoseTime = timestamp;
+      this._smoothed = smoothed;
+      return smoothed.map(point => ({ ...point }));
+    }
+
     _draw(landmarks) {
       const context = this.context;
       if (!context) return;
@@ -377,7 +451,8 @@
       context.lineWidth = Math.max(2, width / 250);
       context.lineCap = 'round';
       context.strokeStyle = 'rgba(169, 218, 196, 0.85)';
-      for (const [from, to] of BODY_CONNECTIONS) {
+      const hand = this.trackingMode === 'hand';
+      for (const [from, to] of hand ? HAND_CONNECTIONS : BODY_CONNECTIONS) {
         const a = landmarks[from];
         const b = landmarks[to];
         if (!isVisible(a) || !isVisible(b)) continue;
@@ -386,14 +461,14 @@
         context.lineTo(b.x * width, b.y * height);
         context.stroke();
       }
-      // Draw body joints only; facial landmarks are never rendered.
-      for (let index = 11; index < landmarks.length; index++) {
+      // Hand indices start at the wrist; body mode skips all facial indices.
+      for (let index = hand ? 0 : 11; index < landmarks.length; index++) {
         const point = landmarks[index];
         if (!isVisible(point)) continue;
-        const wrist = index === 15 || index === 16;
-        context.fillStyle = wrist ? '#edab8d' : '#dcebe4';
+        const highlighted = hand ? index === 0 || index === 8 : index === 15 || index === 16;
+        context.fillStyle = highlighted ? '#edab8d' : '#dcebe4';
         context.beginPath();
-        context.arc(point.x * width, point.y * height, wrist ? 6 : 3, 0, Math.PI * 2);
+        context.arc(point.x * width, point.y * height, highlighted ? 6 : 3, 0, Math.PI * 2);
         context.fill();
       }
     }
@@ -415,6 +490,7 @@
       closeDetector(this._detector);
       this._detector = null;
       this._smoothed = null;
+      this._handIdentity = null;
       this._lastPoseTime = -Infinity;
       if (this.context) this.context.clearRect(0, 0, this.overlay.width, this.overlay.height);
     }

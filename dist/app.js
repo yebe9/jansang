@@ -17,17 +17,16 @@
   let elapsed = 0; // 완료된 기록 구간의 누적 시간. 일시정지 시간은 제외.
   let startedAt = 0;
   let lastFrame = 0;
-  let activePointer = null;
   let stroke = 0;
-  let lastInput = 0;
   let captureAspect = 1;
   let strokeWidth = 3;
   let colorMode = 'speed';
   let playbackRate = 1;
   let dirty = true;
   let intendedFeeling = '';
-  let inputMode = 'pointer';
-  let captureSource = 'pointer';
+  let inputMode = 'hand';
+  let captureSource = 'hand';
+  let handTarget = 'indexTip';
   let camera = null;
   let cameraKind = 'loading';
   let cameraMessage = '';
@@ -50,6 +49,8 @@
   const palette = [[.56,.52,.95],[.40,.83,.77],[.95,.80,.51],[1,.42,.34]];
   const clamp = (value,min,max) => Math.min(max,Math.max(min,value));
   const timestamp = (ms) => (Math.max(0,ms)/1000).toFixed(1).padStart(4,'0');
+  const isCameraInput = () => captureSource === 'hand' || captureSource === 'webcam';
+  const handTargetLabel = () => handTarget === 'wrist' ? '손목' : '검지 끝';
   function announce(message) { $('announcement').textContent = message; }
   function recordTime(now=performance.now()) {
     return clamp(elapsed + (mode === 'recording' ? now-startedAt : 0),0,LIMIT);
@@ -162,7 +163,7 @@
     }
     const w = stage.clientWidth, h = stage.clientHeight;
     // 결과 화면에서도 기록 당시의 가로세로 비율을 보존한다.
-    if(view === 'result' || captureSource === 'webcam') {
+    if(view === 'result' || isCameraInput()) {
       const sx = Math.min(1,captureAspect/(w/h)) * .88;
       const sy = Math.min(1,(w/h)/captureAspect) * .88;
       for(let i=0;i<visible.length;i++) {
@@ -218,7 +219,7 @@
     $('drawing-hint').hidden = next !== 'drawing';
     $('tool-rail').hidden = next !== 'drawing';
     $('intro-action').hidden = next !== 'intro';
-    $('camera-panel').hidden = next !== 'drawing' || captureSource !== 'webcam';
+    $('camera-panel').hidden = next !== 'drawing' || !isCameraInput();
     for(const [id,active] of [['step-start',next==='intro'],['step-draw',next==='drawing'],['step-result',result]]) {
       if(active) $(id).setAttribute('aria-current','step');
       else $(id).removeAttribute('aria-current');
@@ -281,7 +282,7 @@
   }
 
   function analyzeMovement() {
-    motionReport = window.JansangMotion.analyze({source:captureSource, points, poseFrames, durationMs:duration, captureAspect});
+    motionReport = window.JansangMotion.analyze({source:captureSource, handTarget, points, poseFrames, durationMs:duration, captureAspect});
     analysis = motionReport.local;
     analysisKind = 'local';
     analysisMessage = motionReport.sufficient
@@ -364,7 +365,7 @@
     $('export').disabled = lost || !hasPoints;
     $('playback-speed').disabled = lost || !hasPoints;
     $('pause-icon').textContent = mode === 'paused' ? '▶' : 'Ⅱ';
-    $('pause-label').textContent = mode === 'paused' ? (captureSource === 'webcam' ? '이어 기록' : '이어 그리기') : '일시정지';
+    $('pause-label').textContent = mode === 'paused' ? '이어 기록' : '일시정지';
     $('record-time').textContent = timestamp(cursor);
     $('record-progress').value = cursor;
     $('play-icon').textContent = mode === 'playing' ? 'Ⅱ' : '▶';
@@ -377,19 +378,34 @@
     $('state-dot').classList.toggle('recording',mode === 'recording');
     $('stage-status').textContent = ({
       idle:'당신의 움직임을 기다립니다',
-      armed:hasPoints ? '다시 누르면 이어서 기록합니다' : '처음 누르는 순간 기록이 시작됩니다',
+      armed:'READY / 움직임을 만날 준비 중',
       recording:'REC / 움직임을 기록하고 있어요',
       paused:'PAUSE / 잠시 쉬어가는 중',
       playing:'PLAY / 당신이 남긴 리듬',
       'replay-paused':'PAUSE / 잔상을 바라보는 중',
       complete:isExample ? 'EXAMPLE / 합성 예시 움직임' : 'YOUR TRACE / 당신이 남긴 움직임',
     })[mode];
-    if (captureSource === 'webcam' && view === 'drawing') {
-      if (mode === 'armed') $('stage-status').textContent = cameraRequested ? 'TRACKING / 몸을 찾으면 이어서 기록합니다' : 'READY / 자세를 잡고 기록을 시작하세요';
+    if (isCameraInput() && view === 'drawing') {
+      const hand = captureSource === 'hand';
+      if (mode === 'armed') $('stage-status').textContent = cameraRequested
+        ? (hand ? 'TRACKING / 손을 찾으면 이어서 기록합니다' : 'TRACKING / 몸을 찾으면 이어서 기록합니다')
+        : 'READY / 자세를 잡고 기록을 시작하세요';
+      $('camera-mode-label').textContent = hand ? 'LIVE / HAND' : 'LIVE / FULL BODY';
+      $('hand-targets').hidden = !hand;
+      for (const [id, target] of [['hand-index', 'indexTip'], ['hand-wrist', 'wrist']]) {
+        $(id).setAttribute('aria-pressed', String(handTarget === target));
+        $(id).disabled = hasPoints || cameraRequested;
+      }
+      $('camera-instructions').textContent = hand
+        ? `한 손의 손바닥과 손가락을 보여주세요. ${handTargetLabel()}의 움직임이 자취로 남습니다. 얼굴이나 전신은 필요 없어요.`
+        : '어깨부터 양발까지 보이게 서주세요. 손·발·몸의 중심이 잔상으로 남습니다. 얼굴 좌표는 기록·해석하지 않아요.';
+      $('drawing-hint').textContent = hand
+        ? `${handTargetLabel()}으로 공중에 그려보세요 · 손을 숨기면 잠시 멈춤 · Space 일시정지`
+        : '양손·양발·몸의 중심으로 잔상을 남겨보세요 · 전신이 보여야 기록됩니다';
       $('camera-status').textContent = cameraMessage;
       $('camera-record').hidden = cameraRequested || points.length > 0;
       $('camera-record').disabled = !cameraReady || cameraKind !== 'tracking' || lost;
-      $('camera-select').disabled = cameraKind === 'loading' || hasPoints;
+      $('camera-select').disabled = cameraKind === 'loading' || hasPoints || cameraRequested;
       $('camera-retry').hidden = cameraKind !== 'error';
       $('camera-switch-note').textContent = hasPoints
         ? '카메라는 새 기록을 시작할 때 바꿀 수 있어요.'
@@ -399,15 +415,14 @@
     $('stage-guide').classList.toggle('paused',mode === 'paused');
     if(mode === 'paused') {
       $('guide-title').textContent = '잠시 멈춰도 괜찮아요.';
-      $('guide-copy').textContent = '시간도 함께 멈췄어요. 이어 그리거나 결과를 만나보세요.';
+      $('guide-copy').textContent = '시간도 함께 멈췄어요. 이어 기록하거나 결과를 만나보세요.';
     } else if(mode === 'armed') {
-      if (captureSource === 'webcam') {
-        $('guide-title').textContent = cameraKind === 'error' ? '카메라 연결을 확인해 주세요.' : cameraReady ? (cameraRequested ? '당신의 움직임을 기다려요.' : '몸으로 남기는, 작은 잔상.') : '움직임을 만날 준비 중';
-        $('guide-copy').textContent = cameraKind === 'error' ? '왼쪽에서 카메라를 바꾸거나 다시 연결할 수 있어요.' : cameraRequested ? '어깨부터 양발까지 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.' : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
-      } else {
-        $('guide-title').textContent = hasPoints ? '움직임을 이어가볼까요?' : '여기서, 당신의 움직임을.';
-        $('guide-copy').textContent = '마우스나 손가락을 누른 채 움직여보세요.';
-      }
+      $('guide-title').textContent = cameraKind === 'error' ? '카메라 연결을 확인해 주세요.' : cameraReady
+        ? (cameraRequested ? '당신의 움직임을 기다려요.' : captureSource === 'hand' ? '손끝에서 시작되는, 작은 잔상.' : '몸으로 남기는, 작은 잔상.')
+        : '움직임을 만날 준비 중';
+      $('guide-copy').textContent = cameraKind === 'error' ? '왼쪽에서 카메라를 바꾸거나 다시 연결할 수 있어요.'
+        : cameraRequested ? (captureSource === 'hand' ? '한 손을 화면 안으로 옮겨주세요. 손이 보이면 시간이 흐릅니다.' : '어깨부터 양발까지 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.')
+        : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
     } else {
       $('guide-title').textContent = '움직임으로 채워질 공간';
       $('guide-copy').textContent = '작은 움직임 하나면 충분해요.';
@@ -438,21 +453,17 @@
     captureAspect=stage.clientWidth/stage.clientHeight;
     refresh();render();
     canvas.focus({preventScroll:true});
-    $('drawing-hint').textContent = captureSource === 'webcam'
-      ? '양손·양발·몸의 중심으로 잔상을 남겨보세요 · 전신이 보여야 기록됩니다'
-      : '누른 채 움직여보세요 · 손을 떼면 새로운 획 · Space 일시정지';
-    if (captureSource === 'webcam') startCamera();
-    else announce('무대를 누르면 기록이 시작됩니다. 최대 10초이며, 일시정지할 수 있습니다.');
+    startCamera();
   }
 
   function setInputMode(next) {
     inputMode = next;
-    $('input-pointer').setAttribute('aria-pressed', String(next === 'pointer'));
+    $('input-hand').setAttribute('aria-pressed', String(next === 'hand'));
     $('input-webcam').setAttribute('aria-pressed', String(next === 'webcam'));
     $('input-help').textContent = next === 'webcam'
       ? '카메라 허용 후 자세를 잡고 시작하세요. 영상은 저장하지 않아요.'
-      : '처음 그리는 순간부터 10초를 기록합니다.';
-    $('start').firstChild.textContent = next === 'webcam' ? '웹캠 준비하기 ' : '시작하기 ';
+      : '한 손만 보여주세요. 검지 끝 또는 손목으로 공중에 그립니다.';
+    $('start').firstChild.textContent = '웹캠 준비하기 ';
   }
 
   function stopCamera() {
@@ -470,7 +481,7 @@
     camera = null;
     jointTracks.clear();
     cameraKind = 'loading';
-    cameraMessage = '카메라와 자세 인식 모델을 준비하고 있어요.';
+    cameraMessage = captureSource === 'hand' ? '카메라와 손 인식 모델을 준비하고 있어요.' : '카메라와 자세 인식 모델을 준비하고 있어요.';
     cameraReady = false;
     cameraRequested = points.length > 0;
     $('camera-panel').hidden = false;
@@ -479,6 +490,7 @@
     try {
       if (!window.JansangPoseCamera) throw new Error('카메라 기능을 불러오지 못했어요. 페이지를 새로고침해 주세요.');
       current = new window.JansangPoseCamera({
+        trackingMode:captureSource === 'hand' ? 'hand' : 'body',
         video:$('camera-video'), overlay:$('camera-overlay'),
         onDevices({devices, selectedDeviceId}) {
           if (id !== takeId || camera !== current || view !== 'drawing') return;
@@ -524,8 +536,15 @@
   }
 
   function receivePose({landmarks, timestamp:now}) {
-    if (view !== 'drawing' || captureSource !== 'webcam' || !cameraRequested || lost || mode === 'paused') return;
-    const jointIndices = {
+    if (view !== 'drawing' || !isCameraInput() || !cameraRequested || lost || mode === 'paused' || !$('settings').hidden) return;
+    const hand = captureSource === 'hand';
+    const jointIndices = hand ? {
+      wrist:0,thumbCmc:1,thumbMcp:2,thumbIp:3,thumbTip:4,
+      indexMcp:5,indexPip:6,indexDip:7,indexTip:8,
+      middleMcp:9,middlePip:10,middleDip:11,middleTip:12,
+      ringMcp:13,ringPip:14,ringDip:15,ringTip:16,
+      pinkyMcp:17,pinkyPip:18,pinkyDip:19,pinkyTip:20
+    } : {
       leftShoulder:11,rightShoulder:12,leftElbow:13,rightElbow:14,leftWrist:15,rightWrist:16,
       leftPinky:17,rightPinky:18,leftIndex:19,rightIndex:20,leftThumb:21,rightThumb:22,
       leftHip:23,rightHip:24,leftKnee:25,rightKnee:26,leftAnkle:27,rightAnkle:28,
@@ -534,9 +553,11 @@
     const joints = {};
     for (const [name,index] of Object.entries(jointIndices)) {
       const p = landmarks[index];
-      if (p && p.visibility >= .5) joints[name] = [clamp(p.x,0,1), clamp(p.y,0,1)];
+      if (p && p.visibility >= .5 && Number.isFinite(p.x) && Number.isFinite(p.y)) joints[name] = [clamp(p.x,0,1), clamp(p.y,0,1)];
     }
-    if (['leftShoulder','rightShoulder','leftHip','rightHip','leftAnkle','rightAnkle'].some(name => !joints[name])) {
+    const required = hand ? ['wrist','indexMcp','indexTip']
+      : ['leftShoulder','rightShoulder','leftHip','rightHip','leftAnkle','rightAnkle'];
+    if (required.some(name => !joints[name])) {
       if (mode === 'recording') {
         elapsed = recordTime(now);
         cursor = elapsed;
@@ -555,12 +576,12 @@
     if (mode !== 'recording') return;
     const t = recordTime(now);
     if (!poseFrames.length || t > poseFrames[poseFrames.length-1].t) poseFrames.push({t,joints,segment:poseSegment});
-    // Five traces keep the dance readable; all 22 body joints remain in the analysis.
-    const traceJoints = {...joints, bodyCenter:[
+    // One chosen hand point or five dance traces; all observed joints stay in analysis.
+    const traceJoints = hand ? joints : {...joints, bodyCenter:[
       (joints.leftHip[0] + joints.rightHip[0])/2,
       (joints.leftHip[1] + joints.rightHip[1])/2
     ]};
-    for (const joint of ['leftWrist','rightWrist','leftAnkle','rightAnkle','bodyCenter']) {
+    for (const joint of hand ? [handTarget] : ['leftWrist','rightWrist','leftAnkle','rightAnkle','bodyCenter']) {
       if (!traceJoints[joint]) { jointTracks.delete(joint); continue; }
       const [x,y] = traceJoints[joint];
       const prev = jointTracks.get(joint);
@@ -575,33 +596,10 @@
     if (t >= LIMIT) finishRecording();
   }
 
-  function releasePointer() {
-    const id=activePointer;
-    activePointer=null;
-    if(id !== null && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
-  }
-
-  function addPoint(event,force=false) {
-    const now=performance.now();
-    if(!force && now-lastInput<8) return;
-    const t=recordTime(now);
-    const rect=canvas.getBoundingClientRect();
-    const p={x:clamp((event.clientX-rect.left)/rect.width,0,1),y:clamp((event.clientY-rect.top)/rect.height,0,1),t,stroke,speed:0};
-    const prev=points[points.length-1];
-    if(prev && prev.stroke===stroke) {
-      if(p.t<=prev.t) return;
-      const distance=Math.hypot((p.x-prev.x)*rect.width/rect.height,p.y-prev.y);
-      p.speed=prev.speed*.5+distance/((p.t-prev.t)/1000)*.5;
-    }
-    points.push(p);lastInput=now;cursor=t;dirty=true;
-    if(t>=LIMIT) finishRecording();
-  }
-
   function pauseRecording() {
     if(view!=='drawing' || !['recording','armed'].includes(mode) || !points.length) return;
     elapsed=recordTime();
     cursor=elapsed;
-    releasePointer();
     if(elapsed>=LIMIT) { finishRecording();return; }
     mode='paused';dirty=true;refresh();
     jointTracks.clear();
@@ -614,7 +612,7 @@
       closeSettings(false);
       mode='armed';refresh();
       canvas.focus({preventScroll:true});
-      announce(captureSource === 'webcam' ? '몸이 인식되면 남은 시간 동안 기록을 이어갑니다.' : '무대를 다시 누르면 남은 시간 동안 기록을 이어갑니다.');
+      announce(captureSource === 'hand' ? '손이 인식되면 남은 시간 동안 기록을 이어갑니다.' : '몸이 인식되면 남은 시간 동안 기록을 이어갑니다.');
     } else pauseRecording();
   }
 
@@ -622,7 +620,9 @@
     setView('result');
     $('result-duration').textContent=(duration/1000).toFixed(1);
     $('result-strokes').textContent=new Set(points.map(p=>p.stroke)).size;
-    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.' : captureSource === 'webcam' ? '양손·양발·몸의 중심이 남긴 잔상입니다. 얼굴 좌표와 영상은 기록하지 않았어요.' : '재생 버튼을 눌러, 당신이 남긴 리듬을 다시 만나보세요.';
+    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.'
+      : captureSource === 'hand' ? `${handTargetLabel()}이 남긴 잔상입니다. 손의 좌표만 기록하고 영상은 저장하지 않았어요.`
+      : '양손·양발·몸의 중심이 남긴 잔상입니다. 얼굴 좌표와 영상은 기록하지 않았어요.';
     openResult();
     $('result-panel').scrollTop = 0;
     workspace.scrollTop = 0;
@@ -658,7 +658,6 @@
     if(view!=='drawing' || !points.length) return;
     duration=Math.max(1,recordTime());
     elapsed=duration;cursor=duration;
-    releasePointer();
     mode='complete';
     stopCamera();
     showResult();
@@ -675,7 +674,7 @@
   function toggleSettings() {
     if(lost || view!=='drawing') return;
     if(!$('settings').hidden) { closeSettings();return; }
-    if(mode==='recording' || (captureSource==='webcam' && mode==='armed' && points.length)) pauseRecording();
+    if(mode==='recording' || (isCameraInput() && mode==='armed' && points.length)) pauseRecording();
     if(view!=='drawing') return;
     $('settings').hidden=false;
     $('settings-toggle').setAttribute('aria-expanded','true');
@@ -725,23 +724,6 @@
     resetFeelings();showResult();
   }
 
-  canvas.addEventListener('pointerdown',event=>{
-    if(lost || captureSource==='webcam' || view!=='drawing' || !['armed','recording'].includes(mode) || activePointer!==null || event.button>0 || !$('settings').hidden || dialog.open) return;
-    event.preventDefault();
-    if(mode==='armed') { startedAt=performance.now();mode='recording'; }
-    stroke++;activePointer=event.pointerId;
-    canvas.setPointerCapture(event.pointerId);
-    addPoint(event,true);refresh();
-  });
-  canvas.addEventListener('pointermove',event=>{
-    if(mode==='recording' && activePointer===event.pointerId) addPoint(event);
-  });
-  canvas.addEventListener('pointerup',event=>{
-    if(mode==='recording' && activePointer===event.pointerId) { addPoint(event,true);releasePointer(); }
-  });
-  canvas.addEventListener('pointercancel',()=>{ releasePointer();pauseRecording(); });
-  canvas.addEventListener('lostpointercapture',()=>{ activePointer=null; });
-
   $('open-start').addEventListener('click',openStart);
   $('restart').addEventListener('click',openStart);
   $('result-close').addEventListener('click',()=>closeResult());
@@ -749,15 +731,22 @@
   resultDialog.addEventListener('cancel',event=>{ event.preventDefault();closeResult(); });
   $('dialog-close').addEventListener('click',()=>dialog.close());
   $('start').addEventListener('click',startDrawing);
-  $('input-pointer').addEventListener('click',()=>setInputMode('pointer'));
+  $('input-hand').addEventListener('click',()=>setInputMode('hand'));
   $('input-webcam').addEventListener('click',()=>setInputMode('webcam'));
+  for (const [id, target] of [['hand-index', 'indexTip'], ['hand-wrist', 'wrist']]) {
+    $(id).addEventListener('click',()=>{
+      if (view !== 'drawing' || captureSource !== 'hand' || points.length || cameraRequested) return;
+      handTarget = target;
+      refresh();
+    });
+  }
   $('camera-select').addEventListener('change',()=>{
-    if (view !== 'drawing' || captureSource !== 'webcam' || points.length || cameraKind === 'loading') return;
+    if (view !== 'drawing' || !isCameraInput() || points.length || cameraRequested || cameraKind === 'loading') return;
     cameraDeviceId = $('camera-select').value;
     startCamera();
   });
   $('camera-retry').addEventListener('click',()=>{
-    if (view !== 'drawing' || captureSource !== 'webcam' || cameraKind !== 'error') return;
+    if (view !== 'drawing' || !isCameraInput() || cameraKind !== 'error') return;
     startCamera();
   });
   $('camera-record').addEventListener('click',()=>{
@@ -767,7 +756,7 @@
     mode = 'armed';
     refresh();
     canvas.focus({preventScroll:true});
-    announce('몸이 인식되면 10초의 움직임을 기록합니다.');
+    announce(captureSource === 'hand' ? '손이 인식되면 10초의 움직임을 기록합니다.' : '몸이 인식되면 10초의 움직임을 기록합니다.');
   });
   $('camera-cancel').addEventListener('click',()=>{
     pauseRecording();
@@ -833,7 +822,7 @@
   });
   document.addEventListener('visibilitychange',()=>{
     if(!document.hidden) return;
-    if(mode==='recording' || (captureSource==='webcam' && mode==='armed' && cameraRequested)) {
+    if(mode==='recording' || (isCameraInput() && mode==='armed' && cameraRequested)) {
       if(points.length) pauseRecording();
       else { cameraRequested = false; refresh(); }
     }
@@ -848,7 +837,7 @@
     analysisController?.abort();
   });
   window.addEventListener('pageshow',event=>{
-    if(event.persisted && captureSource==='webcam' && view==='drawing') {
+    if(event.persisted && isCameraInput() && view==='drawing') {
       mode='idle';
       setView('intro');
       openStart();

@@ -15,6 +15,13 @@
     'leftAnkle', 'rightAnkle', 'leftHeel', 'rightHeel',
     'leftFootIndex', 'rightFootIndex'
   ];
+  const HAND_JOINTS = [
+    'wrist', 'thumbCmc', 'thumbMcp', 'thumbIp', 'thumbTip',
+    'indexMcp', 'indexPip', 'indexDip', 'indexTip',
+    'middleMcp', 'middlePip', 'middleDip', 'middleTip',
+    'ringMcp', 'ringPip', 'ringDip', 'ringTip',
+    'pinkyMcp', 'pinkyPip', 'pinkyDip', 'pinkyTip'
+  ];
   const UPPER_GROUPS = [
     ['leftWrist', 'rightWrist'], ['leftElbow', 'rightElbow'], ['leftShoulder', 'rightShoulder']
   ];
@@ -53,12 +60,12 @@
       .sort((a, b) => a.t - b.t);
   }
 
-  function sanitizeFrames(input, durationMs) {
+  function sanitizeFrames(input, durationMs, names = JOINTS) {
     return (Array.isArray(input) ? input : [])
       .filter((frame) => frame && finite(frame.t) && frame.t >= 0 && frame.t <= durationMs)
       .map((frame) => {
         const joints = {};
-        for (const name of JOINTS) {
+        for (const name of names) {
           const point = coordinate(frame.joints && frame.joints[name]);
           if (point) joints[name] = point;
         }
@@ -133,7 +140,7 @@
       // A body already occupies space while standing. Coverage measures each
       // joint's travel, never the rectangle between separate, stationary limbs.
       for (const name of observed) {
-        if (source !== 'webcam') {
+        if (source !== 'webcam' && source !== 'hand') {
           positions.push(joints[name]);
           continue;
         }
@@ -221,10 +228,12 @@
       peakSpeed: intervals.reduce((peak, entry) => Math.max(peak, entry.peak), 0),
       stillnessRatio: trackedDurationMs
         ? intervals.filter((entry) => entry.speed < STILL_SPEED).reduce((sum, entry) => sum + entry.dt, 0) / trackedDurationMs : 0,
-      coverage: source === 'webcam' ? bodyCoverage : width * height,
+      coverage: source === 'webcam' || source === 'hand' ? bodyCoverage : width * height,
       spread: spreads.length
         ? spreads.reduce((sum, value) => sum + value, 0) / spreads.length
-        : Math.hypot(width * aspect, height) / diagonal,
+        : source === 'hand' ? [...jointBounds.values()].reduce((largest, bounds) =>
+          Math.max(largest, Math.hypot((bounds[2] - bounds[0]) * aspect, bounds[3] - bounds[1]) / diagonal), 0)
+          : Math.hypot(width * aspect, height) / diagonal,
       tempoVariation: meanSpeed > 0.005 ? Math.sqrt(variance) / meanSpeed : 0,
       directionChangeRate: trackedDurationMs ? weightedTurns / (trackedDurationMs / 1000) : 0,
       pathLength: intervals.reduce((sum, entry) => sum + entry.distance, 0),
@@ -252,20 +261,25 @@
     };
   }
 
-  function describe(metrics, sufficient, source) {
-    const caveat = '측정한 움직임을 간단한 규칙으로 표현한 기본 인상입니다. 실제 감정이나 의도를 판단한 결과가 아닙니다.';
+  function describe(metrics, sufficient, source, handTarget) {
+    const handLabel = handTarget === 'wrist' ? '손목' : '검지 끝';
+    const caveat = (source === 'hand' ? `인식된 한 손의 ${handLabel} 궤적만을 바탕으로, ` : '') +
+      '측정한 움직임을 간단한 규칙으로 표현한 기본 인상입니다. 실제 감정이나 의도를 판단한 결과가 아닙니다.';
     if (!sufficient) {
       return {
         impression: '조금 더 긴 움직임이 필요해요',
         description: source === 'webcam'
           ? '어깨부터 발끝까지 화면에 보이도록 1초 이상 움직여 주세요. 인식된 연속 구간이 짧아 움직임의 인상을 읽기 어렵습니다.'
-          : '1초 이상 궤적을 그려 주세요. 기록된 연속 구간이 짧아 특징을 비교하기 어렵습니다.',
+          : source === 'hand'
+            ? `손을 화면 안에 두고 ${handLabel}을 1초 이상 움직여 주세요. 연속해서 인식된 손의 자취가 짧아 인상을 읽기 어렵습니다.`
+            : '1초 이상 궤적을 그려 주세요. 기록된 연속 구간이 짧아 특징을 비교하기 어렵습니다.',
         observations: ['연속해서 측정할 수 있는 움직임이 부족합니다.'],
         qualities: [],
         caveat
       };
     }
     const observations = [];
+    if (source === 'hand') observations.push(`인식된 한 손의 ${handLabel}이 남긴 자취를 따라 읽은 인상입니다.`);
     const fast = metrics.meanSpeed >= 0.65;
     const slow = metrics.meanSpeed < 0.2;
     const turns = metrics.directionChangeRate >= 1.3;
@@ -301,7 +315,8 @@
         : wide ? '넓게 뻗어나가는 자취가 시원한 공간감을 더합니다.'
           : contrast ? '밀고 나가는 순간과 숨을 고르는 순간이 번갈아 나타납니다.'
             : '이어지는 자취가 하나의 리듬을 남깁니다.';
-    const prefix = source === 'example' ? '합성 예시의 궤적을 보면, ' : '';
+    const prefix = source === 'example' ? '합성 예시의 궤적을 보면, '
+      : source === 'hand' ? `${handLabel}의 자취를 보면, ` : '';
     if (metrics.stillnessRatio >= 0.7) {
       observations.push('움직임 사이에 머무는 여백이 길게 보입니다.');
     } else if (fast) {
@@ -329,24 +344,39 @@
   }
 
   function analyze(input = {}) {
-    const source = input.source === 'webcam' || input.source === 'example' ? input.source : 'pointer';
+    const source = ['webcam', 'hand', 'example'].includes(input.source) ? input.source : 'pointer';
+    const handTarget = input.handTarget === 'wrist' ? 'wrist' : 'indexTip';
     const durationMs = finite(input.durationMs) ? clamp(input.durationMs, 0, 10000) : 10000;
     const aspect = finite(input.captureAspect) ? clamp(input.captureAspect, 0.2, 5) : 1;
     const data = source === 'webcam'
       ? sanitizeFrames(input.poseFrames, durationMs)
       : sanitizePoints(input.points, durationMs);
-    const { metrics, sufficient } = measure(source, data, aspect);
-    const samples = sampleEvenly(data).map((frame) => {
-      if (source !== 'webcam') {
+    const measured = measure(source, data, aspect);
+    const { metrics } = measured;
+    let sufficient = measured.sufficient;
+    let sampleData = data;
+    if (source === 'hand') {
+      const frames = sanitizeFrames(input.poseFrames, durationMs, HAND_JOINTS);
+      sampleData = frames.filter((frame) => frame.joints[handTarget] && Object.keys(frame.joints).length >= 2);
+      // The selected trace drives the impression. Hand observations are also
+      // required so pointer-only input cannot masquerade as a camera recording.
+      sufficient = sufficient && sampleData.length >= 8 &&
+        sampleData.at(-1).t - sampleData[0].t >= 1000;
+      metrics.validFrameRatio = round(frames.length ? sampleData.length / frames.length : 0);
+    }
+    const samples = sampleEvenly(sampleData).map((frame) => {
+      if (source !== 'webcam' && source !== 'hand') {
         return { t: Math.min(durationMs, round(frame.t, 3)), x: round(frame.x), y: round(frame.y), stroke: frame.stroke };
       }
       const joints = {};
       for (const [name, point] of Object.entries(frame.joints)) joints[name] = point.map((value) => round(value));
       return { t: Math.min(durationMs, round(frame.t, 3)), joints, segment: frame.segment };
     });
+    const payload = { source, durationMs, sampleCount: sampleData.length, metrics, samples };
+    if (source === 'hand') payload.handTarget = handTarget;
     return {
-      payload: { source, durationMs, sampleCount: data.length, metrics, samples },
-      local: describe(metrics, sufficient, source),
+      payload,
+      local: describe(metrics, sufficient, source, handTarget),
       sufficient
     };
   }

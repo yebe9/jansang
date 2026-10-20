@@ -118,6 +118,85 @@ test('full-body numeric samples reach Gemini while face coordinates are rejected
   }
 });
 
+test('hand traces reach Gemini with the selected target and no unsupported whole-body claims', async () => {
+  const { handleApi, validateMotion, MAX_BODY_BYTES } = await handler;
+  const { analyze } = require('../dist/motion-analysis.js');
+  const names = [
+    'wrist', 'thumbCmc', 'thumbMcp', 'thumbIp', 'thumbTip',
+    'indexMcp', 'indexPip', 'indexDip', 'indexTip',
+    'middleMcp', 'middlePip', 'middleDip', 'middleTip',
+    'ringMcp', 'ringPip', 'ringDip', 'ringTip',
+    'pinkyMcp', 'pinkyPip', 'pinkyDip', 'pinkyTip'
+  ];
+  const poseFrames = Array.from({ length: 151 }, (_, i) => ({
+    t: i * 66, segment: i < 75 ? 0 : 1,
+    joints: Object.fromEntries(names.map((name, n) => [name, [
+      0.4 + 0.1 * Math.sin(i * 0.2 + n), 0.3 + n / 50
+    ]]))
+  }));
+  for (const handTarget of ['indexTip', 'wrist']) {
+    const points = poseFrames.map((frame) => ({
+      t: frame.t, stroke: frame.segment,
+      x: frame.joints[handTarget][0], y: frame.joints[handTarget][1]
+    }));
+    const report = analyze({ source: 'hand', handTarget, poseFrames, points, durationMs: 10000 });
+    assert.equal(report.sufficient, true);
+    assert.equal(report.payload.samples.length, 60);
+    assert.equal(Object.keys(report.payload.samples[0].joints).length, 21);
+    assert.ok(Buffer.byteLength(JSON.stringify(report.payload), 'utf8') < MAX_BODY_BYTES);
+    assert.deepEqual(validateMotion(report.payload), report.payload);
+    const response = await handleApi(request(report.payload), { env, fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), report.payload);
+      const prompt = body.systemInstruction.parts[0].text;
+      assert.match(prompt, /source가 hand이면 웹캠으로 한 손의 21개 관절만/);
+      assert.match(prompt, /전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다/);
+      assert.match(prompt, /handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목/);
+      assert.match(prompt, /전신 관절이나 fullBodyRatio가 없다는 이유로 손 기록을 불충분하다고 판단하지 않는다/);
+      return goodResponse();
+    } });
+    assert.equal(response.status, 200);
+  }
+});
+
+test('hand and body joint schemas stay separate and hand selection is constrained', async () => {
+  const { handleApi } = await handler;
+  const handMotion = () => ({
+    source: 'hand', handTarget: 'indexTip', durationMs: 1000, sampleCount: 20,
+    metrics: { meanSpeed: 0.3, validFrameRatio: 1 },
+    samples: [
+      { t: 0, segment: 0, joints: { wrist: [0.3, 0.5], indexTip: [0.3, 0.2] } },
+      { t: 1000, segment: 1, joints: { wrist: [0.3, 0.5], indexTip: [0.7, 0.2] } }
+    ]
+  });
+  for (const mutate of [
+    data => { data.source = 'face'; },
+    data => { delete data.handTarget; },
+    data => { data.handTarget = 'nose'; },
+    data => { data.handTarget = 'leftWrist'; },
+    data => { data.samples[0].joints.nose = [0.5, 0.1]; },
+    data => { data.samples[0].joints.leftShoulder = [0.5, 0.1]; },
+    data => { data.samples[0].joints.leftWrist = [0.5, 0.1]; },
+    data => { data.samples[0].joints.indexTip = [0.5, 'right']; },
+    data => { delete data.samples[0].joints.indexTip; },
+    data => { data.metrics.fullBodyRatio = 0; },
+    data => { data.metrics.lowerBodySpeed = 0; },
+    data => { data.intention = '초조한'; },
+    data => { data.samples[0].image = 'data:image/png;base64,...'; },
+  ]) {
+    const bad = handMotion(); mutate(bad);
+    const response = await handleApi(request(bad), { env, fetchImpl: noFetch });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'INVALID_MOTION');
+  }
+  const webcamWithHand = motion();
+  webcamWithHand.samples[0].joints.indexTip = [0.3, 0.2];
+  assert.equal((await handleApi(request(webcamWithHand), { env, fetchImpl: noFetch })).status, 400);
+  const webcamWithTarget = motion();
+  webcamWithTarget.handTarget = 'wrist';
+  assert.equal((await handleApi(request(webcamWithTarget), { env, fetchImpl: noFetch })).status, 400);
+});
+
 test('pause segment identifiers survive validation and reach the model', async () => {
   const { handleApi } = await handler;
   const segmented = motion();

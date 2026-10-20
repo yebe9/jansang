@@ -171,6 +171,16 @@ function createApp({ fetchResponse, cameraStart } = {}) {
       await elements.get('camera-record').click();
       return camera;
     },
+    async startHand(target = 'indexTip') {
+      await elements.get('input-hand').click();
+      await elements.get('start').click();
+      await flush();
+      const camera = cameras.at(-1);
+      await elements.get(target === 'wrist' ? 'hand-wrist' : 'hand-index').click();
+      camera.tracking();
+      await elements.get('camera-record').click();
+      return camera;
+    },
   };
 }
 
@@ -499,7 +509,7 @@ test('a fresh take aborts an in-flight request and ignores its delayed success',
   assert.equal(signal.aborted, false);
   app.get('analysis-evidence').open = true;
   await app.click('restart');
-  await app.click('input-pointer');
+  await app.click('input-hand');
   await app.click('start');
   assert.equal(signal.aborted, true);
   assert.equal(app.document.body.dataset.view, 'drawing');
@@ -527,4 +537,119 @@ test('an AI error keeps measured local results and shows the server guidance', a
   assert.match(app.get('analysis-status').textContent, /무료 사용량 한도/);
   assert.match(app.get('analysis-status').textContent, /규칙 기반 기본 인상/);
   assert.equal(app.get('analyze-button').disabled, false);
+});
+
+function handLandmarks(index = 0) {
+  const hand = Array.from({ length: 21 }, (_, i) => ({
+    x: 0.4 + (i % 4) * 0.025,
+    y: 0.7 - Math.floor(i / 4) * 0.06,
+    z: 0,
+    visibility: 1,
+  }));
+  hand[0] = { x: 0.45, y: 0.75, z: 0, visibility: 1 };
+  hand[8] = { x: 0.3 + index * 0.012, y: 0.35, z: 0, visibility: 1 };
+  return hand;
+}
+
+function recordHand(camera, start = 1000, count = 21, offset = 0) {
+  for (let i = 0; i < count; i++) camera.emit(start + i * 65, handLandmarks(i + offset));
+}
+
+test('default hand mode replaces mouse input and records one fingertip trail with 21 hand joints', async () => {
+  const app = createApp();
+  assert.equal(app.get('input-hand').getAttribute('aria-pressed'), 'true');
+  assert.equal(app.get('input-pointer'), undefined);
+  await app.click('start');
+  await flush();
+  const camera = app.cameras.at(-1);
+  assert.equal(camera.options.trackingMode, 'hand');
+  assert.equal(app.get('camera-mode-label').textContent, 'LIVE / HAND');
+  assert.equal(app.get('hand-targets').hidden, false);
+  await app.get('canvas').dispatch('pointerdown', { pointerId: 1, button: 0, clientX: 30, clientY: 30 });
+  await app.get('canvas').dispatch('pointermove', { pointerId: 1, clientX: 300, clientY: 300 });
+  assert.equal(app.get('finish').disabled, true, 'Mouse motion does not create a take');
+  camera.tracking();
+  await app.click('camera-record');
+  recordHand(camera);
+  await app.click('finish');
+  const { input, report } = app.reports.at(-1);
+  assert.equal(input.source, 'hand');
+  assert.equal(input.handTarget, 'indexTip');
+  assert.equal(input.points.length, 21);
+  assert.equal(new Set(input.points.map(p => p.stroke)).size, 1);
+  assert.equal(Object.keys(input.poseFrames[0].joints).length, 21);
+  assert.equal(input.poseFrames[0].joints.leftShoulder, undefined);
+  assert.equal(input.points.at(-1).x, handLandmarks(20)[8].x);
+  assert.equal(report.sufficient, true, 'A visible hand needs no full-body gate');
+  assert.equal(report.payload.source, 'hand');
+  assert.equal(report.payload.handTarget, 'indexTip');
+  assert.ok(report.payload.metrics.pathLength > 0.1);
+  assert.equal(camera.stopped, true);
+  assert.match(app.get('result-caption').textContent, /검지 끝/);
+});
+
+test('wrist selection records the wrist instead of moving fingertips and is locked during a take', async () => {
+  const app = createApp();
+  const camera = await app.startHand('wrist');
+  recordHand(camera);
+  assert.equal(app.get('hand-index').disabled, true);
+  await app.get('hand-index').dispatch('click');
+  await app.click('finish');
+  const { input, report } = app.reports.at(-1);
+  assert.equal(input.handTarget, 'wrist');
+  assert.equal(report.payload.handTarget, 'wrist');
+  assert.ok(input.points.every(p => p.x === 0.45 && p.y === 0.75));
+  assert.equal(report.payload.metrics.pathLength, 0, 'Moving only the finger does not become wrist motion');
+  assert.match(app.get('result-caption').textContent, /손목/);
+});
+
+test('hand loss freezes recording and resumes in a fresh segment without a connecting line', async () => {
+  const app = createApp();
+  const camera = await app.startHand();
+  recordHand(camera);
+  camera.emit(2400, []);
+  const count = app.get('point-count').textContent;
+  camera.emit(4500, []);
+  assert.equal(app.get('point-count').textContent, count);
+  assert.match(app.get('stage-status').textContent, /손을 찾으면/);
+  recordHand(camera, 5000, 11, 30);
+  await app.click('finish');
+  const { input, report } = app.reports.at(-1);
+  assert.equal(input.durationMs, 2050);
+  assert.equal(new Set(input.points.map(p => p.stroke)).size, 2);
+  assert.deepEqual([...new Set(report.payload.samples.map(p => p.segment))], [1, 2]);
+  assert.ok(report.payload.metrics.pathLength < 0.35, 'The position jump while hidden is omitted');
+});
+
+test('switching from hand input to full body stops the old camera and ignores stale hand frames', async () => {
+  const app = createApp();
+  const hand = await app.startHand();
+  await app.click('camera-cancel');
+  assert.equal(hand.stopped, true);
+  const body = await app.startWebcam();
+  assert.equal(body.options.trackingMode, 'body');
+  assert.equal(app.get('hand-targets').hidden, true);
+  hand.emit(500, handLandmarks());
+  assert.equal(app.get('finish').disabled, true);
+  record(body);
+  await app.click('finish');
+  assert.equal(app.reports.at(-1).input.source, 'webcam');
+  assert.equal(app.reports.at(-1).input.points.length, 105);
+});
+
+test('hand AI request identifies the selected point without sending private intent or body coordinates', async () => {
+  const app = createApp({ fetchResponse: async () => ok(aiResult) });
+  app.get('ai-consent').checked = true;
+  const camera = await app.startHand();
+  app.get('intent-detail').value = '숨겨 둘 개인적인 표현';
+  recordHand(camera);
+  await app.click('finish');
+  await flush();
+  assert.equal(app.calls.length, 1);
+  const { payload, options } = app.calls[0];
+  assert.equal(payload.source, 'hand');
+  assert.equal(payload.handTarget, 'indexTip');
+  assert.ok(payload.samples.every(frame => frame.joints.indexTip && frame.joints.wrist && !frame.joints.leftShoulder));
+  assert.ok(!options.body.includes('개인적인'));
+  assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
 });

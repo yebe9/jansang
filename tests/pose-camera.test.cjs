@@ -25,7 +25,7 @@ function cameraStream(label = 'Camera', deviceId = 'camera') {
   return { track, stream };
 }
 
-function fixture() {
+function fixture({ trackingMode = 'body' } = {}) {
   let nextRaf = 1;
   const scheduled = new Map();
   const context = {
@@ -40,25 +40,33 @@ function fixture() {
     cancelAnimationFrame(id) { scheduled.delete(id); }
   };
   vm.createContext(context);
-  vm.runInContext(source, context);
+  // Keep model setup real while replacing only its external CDN import in
+  // factory-specific tests. Normal frame/lifecycle tests supply a fake detector.
+  vm.runInContext(source.replace('import(`${PACKAGE}/vision_bundle.mjs`)',
+    'Promise.resolve(globalThis.__vision)'), context);
   const { track, stream } = cameraStream();
   const video = {
     style: {}, setAttribute() {}, play: () => Promise.resolve(), pause() {},
     readyState: 4, currentTime: 0, videoWidth: 640, videoHeight: 480
   };
-  const paint = { clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {} };
+  const arcs = [];
+  const paint = { clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
+    arc(...args) { arcs.push(args); }, fill() {} };
   const overlay = { style: {}, width: 640, height: 480, getContext: () => paint };
   const frames = [], statuses = [], deviceReports = [];
   const camera = new context.window.JansangPoseCamera({
-    video, overlay, onFrame: frame => frames.push(frame), onStatus: status => statuses.push(status),
+    video, overlay, trackingMode, onFrame: frame => frames.push(frame), onStatus: status => statuses.push(status),
     onDevices: report => deviceReports.push(report)
   });
   let closed = 0, calls = 0;
-  let raw = Array.from({ length: 33 }, () => ({ x: 0.25, y: 0.4, z: 0.1, visibility: 0.9 }));
+  let raw = Array.from({ length: trackingMode === 'hand' ? 21 : 33 },
+    () => ({ x: 0.25, y: 0.4, z: 0.1, ...(trackingMode === 'hand' ? {} : { visibility: 0.9 }) }));
+  let handedness = { categoryName: 'Right', score: 0.95 };
   const detector = {
-    detectForVideo() { calls++; return { landmarks: raw ? [raw] : [], close() {} }; },
+    detectForVideo() { calls++; return { landmarks: raw ? [raw] : [], handedness: [[handedness]], close() {} }; },
     close() { closed++; }
   };
+  const createDetector = camera._createDetector;
   camera._createDetector = () => Promise.resolve(detector);
   context.navigator.mediaDevices.getUserMedia = () => Promise.resolve(stream);
   function frame(timestamp) {
@@ -68,9 +76,10 @@ function fixture() {
     entry[1](timestamp);
   }
   return {
-    camera, track, stream, video, frames, statuses, deviceReports, detector, context, scheduled, frame,
+    camera, track, stream, video, frames, statuses, deviceReports, detector, context, scheduled, frame, createDetector, arcs,
     get closed() { return closed; }, get calls() { return calls; },
-    setRaw(value) { raw = value; }
+    setRaw(value) { raw = value; },
+    setHandedness(value) { handedness = value; }
   };
 }
 
@@ -341,4 +350,186 @@ test('consumer cancellation during ready notification does not schedule capture'
   assert.equal(f.scheduled.size, 0);
   assert.equal(f.track.stopped, 1);
   assert.equal(f.closed, 1);
+});
+
+test('hand mode uses the hand model and preserves GPU-to-CPU fallback', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  const optionsSeen = [];
+  const wasmPaths = [];
+  f.context.__vision = {
+    FilesetResolver: { async forVisionTasks(url) { wasmPaths.push(url); return 'fileset'; } },
+    HandLandmarker: { async createFromOptions(fileset, options) {
+      assert.equal(fileset, 'fileset');
+      optionsSeen.push(JSON.parse(JSON.stringify(options)));
+      if (options.baseOptions.delegate === 'GPU') throw new Error('GPU unavailable');
+      return f.detector;
+    } },
+    PoseLandmarker: { createFromOptions() { assert.fail('Hand mode must never create a body model'); } }
+  };
+  f.camera._createDetector = f.createDetector;
+  assert.equal(await f.camera.start(), true);
+  assert.equal(wasmPaths.length, 1);
+  assert.match(wasmPaths[0], /tasks-vision@0\.10\.32\/wasm$/);
+  assert.equal(optionsSeen.length, 2);
+  assert.equal(optionsSeen[0].baseOptions.delegate, 'GPU');
+  assert.equal(optionsSeen[1].baseOptions.delegate, 'CPU');
+  assert.match(optionsSeen[0].baseOptions.modelAssetPath,
+    /hand_landmarker\/hand_landmarker\/float16\/1\/hand_landmarker\.task$/);
+  assert.equal(optionsSeen[0].runningMode, 'VIDEO');
+  assert.equal(optionsSeen[0].numHands, 1);
+  assert.equal(optionsSeen[0].numPoses, undefined);
+  assert.equal(optionsSeen[0].outputSegmentationMasks, undefined);
+  assert.match(f.statuses.at(-1).message, /한 손/);
+  f.camera.stop();
+  assert.equal(f.closed, 1);
+});
+
+test('default body model remains Full and never creates a hand detector', async () => {
+  const f = fixture();
+  let seen;
+  f.context.__vision = {
+    FilesetResolver: { async forVisionTasks() { return {}; } },
+    PoseLandmarker: { async createFromOptions(_, options) { seen = options; return f.detector; } },
+    HandLandmarker: { createFromOptions() { assert.fail('Body mode must never create a hand model'); } }
+  };
+  f.camera._createDetector = f.createDetector;
+  await f.camera.start();
+  assert.match(seen.baseOptions.modelAssetPath, /pose_landmarker_full\/float16\/1\/pose_landmarker_full\.task$/);
+  assert.equal(seen.numPoses, 1);
+  assert.equal(seen.numHands, undefined);
+  f.camera.stop();
+});
+
+test('hand mode returns 21 mirrored fresh joints without any torso or visibility inputs', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  await f.camera.start();
+  f.frame(100);
+  const first = f.frames[0].landmarks;
+  assert.equal(first.length, 21);
+  assert.equal(first[0].x, 0.75);
+  assert.equal(first[8].x, 0.75);
+  assert.equal(first[8].visibility, 1, 'Hand models provide no per-landmark visibility');
+  assert.equal(f.arcs.length, 21, 'Draw every hand joint, including wrist and fingertip');
+  assert.match(f.statuses.at(-1).message, /손의 움직임/);
+  first[8].x = 0;
+  f.video.currentTime++;
+  f.frame(200);
+  assert.equal(f.frames[1].landmarks[8].x, 0.75, 'Consumer mutation must not corrupt smoothing history');
+  f.camera.stop();
+  assert.equal(f.track.stopped, 1);
+  assert.equal(f.closed, 1);
+  assert.equal(f.scheduled.size, 0);
+});
+
+test('hand loss and invalid required joints emit missing frames and reset smoothing', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  await f.camera.start();
+  f.frame(100);
+  let timestamp = 100;
+  for (const index of [0, 5, 8]) {
+    for (const invalid of [null, { x: NaN, y: 0.5 }, { x: 0.5, y: -0.1 }]) {
+      const raw = Array.from({ length: 21 }, () => ({ x: 0.25, y: 0.4, z: 0 }));
+      raw[index] = invalid;
+      f.setRaw(raw);
+      f.video.currentTime++;
+      f.frame(timestamp += 100);
+      assert.equal(f.frames.at(-1).landmarks.length, 0);
+      assert.equal(f.camera._smoothed, null);
+      assert.equal(f.camera._handIdentity, null);
+      assert.match(f.statuses.at(-1).message, /손을 찾고/);
+    }
+  }
+  f.setRaw(null);
+  f.video.currentTime++;
+  f.frame(timestamp += 100);
+  assert.equal(f.frames.at(-1).landmarks.length, 0);
+  f.setRaw(Array.from({ length: 21 }, () => ({ x: 0.1, y: 0.2, z: 0 })));
+  f.video.currentTime++;
+  f.frame(timestamp += 100);
+  assert.equal(f.frames.at(-1).landmarks[8].x, 0.9, 'Reappearing hand starts without old smoothing');
+  f.camera.stop();
+});
+
+test('invalid optional hand joints are invisible while wrist and index remain usable', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  const raw = Array.from({ length: 21 }, () => ({ x: 0.25, y: 0.4, z: 0 }));
+  raw[4] = null;
+  raw[20] = { x: 1.2, y: 0.3, z: Infinity };
+  f.setRaw(raw);
+  await f.camera.start();
+  f.frame(100);
+  const points = f.frames[0].landmarks;
+  assert.equal(points.length, 21);
+  assert.equal(points[4].visibility, 0);
+  assert.equal(points[20].visibility, 0);
+  assert.equal(points[20].z, 0);
+  assert.equal(points[0].visibility, 1);
+  assert.equal(points[8].visibility, 1);
+  assert.equal(f.arcs.length, 19);
+  f.camera.stop();
+});
+
+test('confident hand replacement emits a gap instead of joining left and right trails', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  await f.camera.start();
+  f.frame(100);
+  f.setHandedness({ categoryName: 'Left', score: 0.99 });
+  f.video.currentTime++;
+  f.frame(200);
+  assert.equal(f.frames.at(-1).landmarks.length, 0);
+  assert.equal(f.camera._smoothed, null);
+  f.video.currentTime++;
+  f.frame(300);
+  assert.equal(f.frames.at(-1).landmarks.length, 21, 'Resume with the replacement hand on the next frame');
+  f.setHandedness({ categoryName: 'Right', score: 0.55 });
+  f.video.currentTime++;
+  f.frame(400);
+  assert.equal(f.frames.at(-1).landmarks.length, 21, 'Uncertain handedness should not interrupt a gesture');
+  f.camera.stop();
+});
+
+test('large hand position discontinuity breaks the stroke even without handedness metadata', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHandedness(undefined);
+  await f.camera.start();
+  f.frame(100);
+  f.setRaw(Array.from({ length: 21 }, () => ({ x: 0.9, y: 0.4, z: 0 })));
+  f.video.currentTime++;
+  f.frame(200);
+  assert.equal(f.frames.at(-1).landmarks.length, 0);
+  f.video.currentTime++;
+  f.frame(300);
+  assert.equal(f.frames.at(-1).landmarks.length, 21);
+  assert.ok(Math.abs(f.frames.at(-1).landmarks[0].x - 0.1) < 1e-10);
+  f.camera.stop();
+});
+
+test('stopping hand mode during model creation closes the late detector', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  const model = deferred();
+  f.camera._createDetector = () => model.promise;
+  const loading = f.camera.start();
+  await new Promise(setImmediate);
+  f.camera.stop();
+  assert.equal(await loading, false);
+  model.resolve(f.detector);
+  await new Promise(setImmediate);
+  assert.equal(f.closed, 1);
+  assert.equal(f.track.stopped, 1);
+  assert.equal(f.scheduled.size, 0);
+});
+
+test('hand mode frozen video and consumer stop cannot leave stale callbacks', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  await f.camera.start();
+  f.frame(100);
+  f.frame(900);
+  assert.equal(f.frames.at(-1).landmarks.length, 0);
+  assert.equal(f.camera._smoothed, null);
+  assert.equal(f.camera._handIdentity, null);
+  f.camera.onFrame = () => f.camera.stop();
+  f.video.currentTime++;
+  f.frame(1000);
+  assert.equal(f.scheduled.size, 0);
+  assert.equal(f.track.stopped, 1);
 });

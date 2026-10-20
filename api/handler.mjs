@@ -11,6 +11,14 @@ const JOINTS = new Set([
   'leftAnkle', 'rightAnkle', 'leftHeel', 'rightHeel',
   'leftFootIndex', 'rightFootIndex',
 ]);
+const HAND_JOINTS = new Set([
+  'wrist', 'thumbCmc', 'thumbMcp', 'thumbIp', 'thumbTip',
+  'indexMcp', 'indexPip', 'indexDip', 'indexTip',
+  'middleMcp', 'middlePip', 'middleDip', 'middleTip',
+  'ringMcp', 'ringPip', 'ringDip', 'ringTip',
+  'pinkyMcp', 'pinkyPip', 'pinkyDip', 'pinkyTip',
+]);
+const BODY_METRICS = ['upperBodySpeed', 'lowerBodySpeed', 'torsoSpeed', 'fullBodyRatio'];
 const METRICS = new Set([
   'meanSpeed', 'peakSpeed', 'stillnessRatio', 'coverage', 'spread',
   'tempoVariation', 'directionChangeRate', 'pathLength',
@@ -40,7 +48,8 @@ const SYSTEM_PROMPT = `너는 미디어아트 작품 '잔상'의 움직임 감�
 description은 감상하듯 자연스러운 두 문장으로 쓴다. "평균 속도 0.3", "방향 전환율", "정지 비율" 같은 숫자나 지표명은 description과 observations에 절대 나열하지 않는다.
 예를 들어 "잔잔하게 이어지는 팔의 흐름에 가벼운 스텝이 더해져 유연하고 경쾌한 인상을 줍니다. 짧게 머무는 순간이 다음 움직임을 기대하게 합니다."와 같은 방식이다. 이 예시의 동작을 데이터에 없는 채로 복사하지 않는다.
 지표만으로 확신을 만들지 말고 좌표에서 확인되는 속도 변화, 멈춤, 방향 전환, 공간 사용, 양팔·다리·몸통의 관계 중 실제 근거가 있는 것만 연결한다.
-웹캠에는 얼굴을 제외한 어깨, 팔꿈치, 손목, 손끝, 골반, 무릎, 발목, 뒤꿈치, 발끝이 최대 22개 제공된다.
+아래에서 "웹캠"이라고 설명하는 전신 지표와 관절은 source가 webcam일 때만 적용된다.
+source가 webcam이면 얼굴을 제외한 어깨, 팔꿈치, 손목, 손끝, 골반, 무릎, 발목, 뒤꿈치, 발끝이 최대 22개 제공된다.
 없는 관절이나 가려진 신체 부위의 움직임을 상상하지 않는다. 발이 관측되면 스텝과 다리 리듬도 읽고, 손목만 보고 전신 춤의 인상을 대신하지 않는다.
 정규화 좌표는 왼쪽 위 (0,0), 오른쪽 아래 (1,1), t와 durationMs는 밀리초다. 웹캠 좌표는 거울처럼 반전된 화면 좌표다.
 meanSpeed와 peakSpeed는 화면 대각선 길이를 1로 둔 초당 거리, pathLength는 화면 대각선 길이를 1로 둔 이동 거리다.
@@ -54,7 +63,11 @@ spread는 화면 대각선 길이를 1로 둔 관측 관절 간 퍼짐이다. �
 tempoVariation은 속도의 표준편차/평균, directionChangeRate는 초당 방향 전환 횟수다.
 trackedDurationMs는 유효하게 추적한 시간, validFrameRatio는 유효 관측 비율, fullBodyRatio는 양어깨·골반·무릎·발목을 모두 관측한 프레임 비율이다.
 fullBodyRatio가 낮으면 보이는 부분만으로 읽었다고 짧게 밝힌다. 모든 지표는 휴리스틱이며 정확한 신체량이 아니다.
-웹캠 sample의 segment가 바뀌면 일시정지 또는 추적 손실 후 새 기록 구간이다. t는 정지 시간을 제외하므로 다른 segment 사이를 연결하거나 그 사이의 속도·방향을 추정하지 않는다.
+source가 webcam 또는 hand인 sample의 segment가 바뀌면 일시정지 또는 추적 손실 후 새 기록 구간이다. t는 정지 시간을 제외하므로 다른 segment 사이를 연결하거나 그 사이의 속도·방향을 추정하지 않는다.
+source가 hand이면 웹캠으로 한 손의 21개 관절만 관측한 기록이다. 손목과 다섯 손가락 이외의 신체는 제공되지 않으므로 팔, 다리, 머리, 몸통, 전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다.
+handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목의 궤적을 우선 감상한다. hand의 meanSpeed, peakSpeed, stillnessRatio, coverage, spread, tempoVariation, directionChangeRate, pathLength, trackedDurationMs는 오직 이 선택한 자취에서 계산한 값이다.
+hand의 coverage와 spread는 선택한 자취가 연속해서 움직인 범위이며 손 자체의 크기나 손가락 간 벌어짐이 아니다. 다른 손가락의 움직임은 실제 관절 좌표에서 관측되는 경우에만 보조 근거로 쓴다. 손목이 가만히 있어도 검지 끝은 움직일 수 있으며 그 반대도 가능하다.
+hand의 validFrameRatio는 선택한 지점을 포함하여 손 관절이 인식된 프레임 비율이다. 전신 관절이나 fullBodyRatio가 없다는 이유로 손 기록을 불충분하다고 판단하지 않는다. "검지 끝이 완만하게 이어져 유연한 자취를 남깁니다."처럼 실제 선택한 손의 자취를 설명한다.
 source가 pointer이면 손으로 그린 선만 관측한 것이므로 신체 자세나 춤을 보았다고 쓰지 않는다.
 source가 example이면 사람이 한 움직임이 아니라 합성 예시임을 description에 밝힌다.
 샘플 간 큰 시간 간격, 추적 손실, 짧은 기록은 해석의 불확실성으로 설명한다.
@@ -76,14 +89,16 @@ const onlyKeys = (value, keys) => Object.keys(value).every(key => keys.includes(
 const invalid = () => { throw new ApiError(400, 'INVALID_MOTION', '움직임 데이터 형식이 올바르지 않습니다. 다시 기록해 주세요.'); };
 
 export function validateMotion(value) {
-  if (!isRecord(value) || !onlyKeys(value, ['source', 'durationMs', 'sampleCount', 'metrics', 'samples'])) invalid();
-  if (!['webcam', 'pointer', 'example'].includes(value.source) || !numberIn(value.durationMs, 1, 10000)) invalid();
+  if (!isRecord(value) || !onlyKeys(value, ['source', 'handTarget', 'durationMs', 'sampleCount', 'metrics', 'samples'])) invalid();
+  if (!['webcam', 'hand', 'pointer', 'example'].includes(value.source) || !numberIn(value.durationMs, 1, 10000)) invalid();
+  if (value.source === 'hand' ? !['indexTip', 'wrist'].includes(value.handTarget) : 'handTarget' in value) invalid();
   if (!Array.isArray(value.samples) || value.samples.length < 2 || value.samples.length > MAX_FRAMES) invalid();
   if (!Number.isInteger(value.sampleCount) || value.sampleCount < value.samples.length || value.sampleCount > 100000) invalid();
   if (!isRecord(value.metrics) || Object.keys(value.metrics).length > METRICS.size) invalid();
   const metrics = {};
   for (const [name, metric] of Object.entries(value.metrics)) {
     if (!METRICS.has(name) || !numberIn(metric, 0, 100000)) invalid();
+    if (value.source === 'hand' && BODY_METRICS.includes(name)) invalid();
     if (['stillnessRatio', 'coverage', 'validFrameRatio', 'fullBodyRatio'].includes(name) && metric > 1) invalid();
     if (['upperBodySpeed', 'lowerBodySpeed', 'torsoSpeed'].includes(name) && metric > 125) invalid();
     metrics[name] = metric;
@@ -92,14 +107,16 @@ export function validateMotion(value) {
   const samples = value.samples.map(sample => {
     if (!isRecord(sample) || !numberIn(sample.t, 0, value.durationMs) || sample.t < previousTime) invalid();
     previousTime = sample.t;
-    if (value.source === 'webcam') {
+    if (value.source === 'webcam' || value.source === 'hand') {
+      const allowedJoints = value.source === 'hand' ? HAND_JOINTS : JOINTS;
       if (!onlyKeys(sample, ['t', 'joints', 'segment']) || !isRecord(sample.joints)) invalid();
       if (sample.segment !== undefined && (!Number.isInteger(sample.segment) || !numberIn(sample.segment, 0, 10000))) invalid();
       const jointEntries = Object.entries(sample.joints);
-      if (jointEntries.length < 2 || jointEntries.length > JOINTS.size) invalid();
+      if (jointEntries.length < 2 || jointEntries.length > allowedJoints.size) invalid();
+      if (value.source === 'hand' && !Object.hasOwn(sample.joints, value.handTarget)) invalid();
       const joints = {};
       for (const [joint, xy] of jointEntries) {
-        if (!JOINTS.has(joint) || !Array.isArray(xy) || xy.length !== 2 || !xy.every(v => numberIn(v, 0, 1))) invalid();
+        if (!allowedJoints.has(joint) || !Array.isArray(xy) || xy.length !== 2 || !xy.every(v => numberIn(v, 0, 1))) invalid();
         joints[joint] = [xy[0], xy[1]];
       }
       return sample.segment === undefined ? { t: sample.t, joints } : { t: sample.t, joints, segment: sample.segment };
@@ -109,7 +126,9 @@ export function validateMotion(value) {
         !Number.isInteger(sample.stroke) || !numberIn(sample.stroke, 0, 10000)) invalid();
     return { t: sample.t, x: sample.x, y: sample.y, stroke: sample.stroke };
   });
-  return { source: value.source, durationMs: value.durationMs, sampleCount: value.sampleCount, metrics, samples };
+  const result = { source: value.source, durationMs: value.durationMs, sampleCount: value.sampleCount, metrics, samples };
+  if (value.source === 'hand') result.handTarget = value.handTarget;
+  return result;
 }
 
 async function readBoundedJson(request) {

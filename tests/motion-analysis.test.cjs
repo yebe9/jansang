@@ -43,6 +43,105 @@ function fullBodySeries(change = () => ({}), count = 61, step = 50) {
     t: i * step, segment: 0, joints: { ...body, ...change(i) }
   }));
 }
+const handNames = [
+  'wrist', 'thumbCmc', 'thumbMcp', 'thumbIp', 'thumbTip',
+  'indexMcp', 'indexPip', 'indexDip', 'indexTip',
+  'middleMcp', 'middlePip', 'middleDip', 'middleTip',
+  'ringMcp', 'ringPip', 'ringDip', 'ringTip',
+  'pinkyMcp', 'pinkyPip', 'pinkyDip', 'pinkyTip'
+];
+function handRecording(handTarget = 'indexTip', count = 61, step = 50) {
+  const poseFrames = Array.from({ length: count }, (_, i) => ({
+    t: i * step, segment: 0,
+    joints: {
+      ...Object.fromEntries(handNames.map((name, n) => [name, [0.3 + n * 0.01, 0.4]])),
+      indexTip: [0.5 + 0.25 * Math.sin(i * 0.3), 0.5 + 0.25 * Math.cos(i * 0.3)]
+    }
+  }));
+  return {
+    source: 'hand', handTarget, poseFrames, durationMs: (count - 1) * step, captureAspect: 1,
+    points: poseFrames.map((frame) => ({
+      t: frame.t, x: frame.joints[handTarget][0], y: frame.joints[handTarget][1], stroke: frame.segment
+    }))
+  };
+}
+
+test('hand impressions follow the selected fingertip or wrist without a full-body gate', () => {
+  const finger = analyze(handRecording());
+  const wrist = analyze(handRecording('wrist'));
+  assert.equal(finger.sufficient, true);
+  assert.equal(wrist.sufficient, true);
+  assert.equal(finger.payload.source, 'hand');
+  assert.equal(finger.payload.handTarget, 'indexTip');
+  assert.equal(wrist.payload.handTarget, 'wrist');
+  assert.ok(finger.payload.metrics.meanSpeed > 1);
+  assert.equal(wrist.payload.metrics.meanSpeed, 0);
+  assert.equal(wrist.payload.metrics.stillnessRatio, 1);
+  assert.notEqual(finger.local.impression, wrist.local.impression);
+  for (const name of ['fullBodyRatio', 'upperBodySpeed', 'lowerBodySpeed', 'torsoSpeed']) {
+    assert.equal(finger.payload.metrics[name], undefined);
+  }
+  assert.match(finger.local.description, /검지 끝/);
+  assert.match(wrist.local.description, /손목/);
+  assert.match(finger.local.observations[0], /한 손의 검지 끝/);
+  assert.match(finger.local.caveat, /한 손의 검지 끝 궤적만/);
+  assert.doesNotMatch(JSON.stringify(finger.local), /어깨|하체|전신|발목|다리/);
+});
+
+test('hand payload keeps 21 observed joints and at most 60 samples without face or body data', () => {
+  const input = handRecording('indexTip', 151, 66);
+  for (const frame of input.poseFrames) {
+    frame.joints.nose = [0.5, 0.1];
+    frame.joints.leftShoulder = [0.4, 0.3];
+  }
+  delete input.poseFrames[0].joints.pinkyTip;
+  const result = analyze(input);
+  assert.equal(result.sufficient, true);
+  assert.equal(result.payload.sampleCount, 151);
+  assert.equal(result.payload.samples.length, 60);
+  assert.equal(Object.keys(result.payload.samples.at(-1).joints).length, 21);
+  assert.equal(result.payload.samples[0].joints.pinkyTip, undefined);
+  assert.deepEqual(result.payload.samples.at(-1).joints.indexTip,
+    input.poseFrames.at(-1).joints.indexTip.map((v) => Math.round(v * 1e5) / 1e5));
+  assert.ok(result.payload.samples.every((frame) => !('nose' in frame.joints) && !('leftShoulder' in frame.joints)));
+  assert.ok(Buffer.byteLength(JSON.stringify(result.payload), 'utf8') < 100 * 1024);
+});
+
+test('hand tracking gaps cannot create distance or coverage across separate strokes', () => {
+  const input = handRecording();
+  input.points = input.points.map((point, i) => ({
+    ...point, x: i < 30 ? 0.1 : 0.9, y: i < 30 ? 0.1 : 0.9, stroke: i < 30 ? 1 : 2
+  }));
+  input.poseFrames = input.poseFrames.map((frame, i) => ({ ...frame, segment: i < 30 ? 1 : 2 }));
+  const result = analyze(input);
+  assert.equal(result.sufficient, true);
+  assert.equal(result.payload.metrics.meanSpeed, 0);
+  assert.equal(result.payload.metrics.pathLength, 0);
+  assert.equal(result.payload.metrics.coverage, 0);
+  assert.equal(result.payload.metrics.spread, 0);
+  assert.equal(result.payload.metrics.directionChangeRate, 0);
+  assert.equal(result.payload.metrics.trackedDurationMs, 2950);
+  assert.equal(result.payload.samples[0].segment, 1);
+  assert.equal(result.payload.samples.at(-1).segment, 2);
+});
+
+test('hand analysis needs actual hand observations and a continuous selected trace', () => {
+  const input = handRecording();
+  assert.equal(analyze({ ...input, poseFrames: [] }).sufficient, false);
+  assert.equal(analyze({ ...input, points: [] }).sufficient, false);
+  const invisible = input.poseFrames.map((frame) => {
+    const { indexTip, ...joints } = frame.joints;
+    return { ...frame, joints };
+  });
+  const result = analyze({ ...input, poseFrames: invisible });
+  assert.equal(result.sufficient, false);
+  assert.equal(result.payload.metrics.validFrameRatio, 0);
+  assert.equal(result.payload.samples.length, 0);
+  assert.match(result.local.description, /손을 화면 안에/);
+  assert.doesNotMatch(result.local.description, /어깨|발끝|전신/);
+  const defaultTarget = analyze({ ...input, handTarget: undefined });
+  assert.equal(defaultTarget.payload.handTarget, 'indexTip');
+});
 
 test('footwork changes the impression when the upper body stays still', () => {
   const still = webcam(fullBodySeries());
