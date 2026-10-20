@@ -4,41 +4,61 @@ export const DEFAULT_MODEL = 'gemini-3.8-flash';
 export const MAX_BODY_BYTES = 100 * 1024;
 const MAX_FRAMES = 80;
 const JOINTS = new Set([
-  'leftWrist', 'rightWrist', 'leftElbow', 'rightElbow',
-  'leftShoulder', 'rightShoulder', 'leftHip', 'rightHip',
+  'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow',
+  'leftWrist', 'rightWrist', 'leftPinky', 'rightPinky',
+  'leftIndex', 'rightIndex', 'leftThumb', 'rightThumb',
+  'leftHip', 'rightHip', 'leftKnee', 'rightKnee',
+  'leftAnkle', 'rightAnkle', 'leftHeel', 'rightHeel',
+  'leftFootIndex', 'rightFootIndex',
 ]);
 const METRICS = new Set([
   'meanSpeed', 'peakSpeed', 'stillnessRatio', 'coverage', 'spread',
   'tempoVariation', 'directionChangeRate', 'pathLength',
   'trackedDurationMs', 'validFrameRatio',
+  'upperBodySpeed', 'lowerBodySpeed', 'torsoSpeed', 'fullBodyRatio',
 ]);
 const OUTPUT_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    impression: { type: 'STRING', description: '움직임의 인상, 한국어 2~15자' },
-    description: { type: 'STRING', description: '관측된 움직임이 주는 인상을 한국어 2~3문장으로 설명' },
-    observations: { type: 'ARRAY', items: { type: 'STRING' }, minItems: 1, maxItems: 4 },
-    qualities: { type: 'ARRAY', items: { type: 'STRING' }, minItems: 1, maxItems: 4 },
+    impression: { type: 'STRING', description: '유연한, 빠른, 경쾌한, 초조한 등의 대표 인상 형용사 하나, 한국어 2~10자' },
+    description: { type: 'STRING', description: '움직임이 주는 분위기와 리듬을 감상하듯 설명하는 한국어 두 문장. 숫자나 기술 용어 금지' },
+    observations: { type: 'ARRAY', items: { type: 'STRING', description: '인상을 뒷받침하는 눈에 보이는 움직임. 숫자와 지표명 대신 일상적인 한국어로 표현' }, minItems: 1, maxItems: 4 },
+    qualities: { type: 'ARRAY', items: { type: 'STRING', description: '짧은 인상 형용사. 예: 유연한, 빠른, 초조한' }, minItems: 3, maxItems: 3 },
     caveat: { type: 'STRING', description: '실제 감정의 판정이 아니며 데이터의 한계를 설명하는 한국어 한 문장' },
   },
   required: ['impression', 'description', 'observations', 'qualities', 'caveat'],
 };
 
 const SYSTEM_PROMPT = `너는 미디어아트 작품 '잔상'의 움직임 감상 도우미다.
-오직 제공된 숫자 좌표와 측정값을 보고 움직임이 관객에게 줄 수 있는 시각적 인상을 한국어로 묘사한다.
+오직 제공된 숫자 좌표와 측정값을 보고 춤과 움직임이 관객에게 줄 수 있는 시각적 인상을 한국어로 묘사한다.
+주인공은 객관적인 사실의 나열이 아니라 움직임에서 느껴지는 질감, 리듬, 분위기다.
+대표 표현은 반드시 "유연한", "빠른", "경쾌한", "차분한", "날카로운", "머뭇거리는", "초조한" 같은 짧은 형용사 하나로 쓴다.
+관측 근거에 맞는 표현을 자유롭게 고르되 특정 단어를 반드시 사용할 필요는 없다.
 원본 영상, 얼굴, 음성은 제공되지 않는다. 실제 감정, 정신 상태, 의도, 성격, 건강, 정체성이나 인구통계는 추론하지 않는다.
-"슬프다", "불안하다"처럼 사람의 상태를 단정하지 말고 "조심스럽게 멈추는 듯한 인상", "경쾌한 리듬으로 읽힐 수 있다"처럼 표현의 가능성을 말한다.
-지표만으로 확신을 만들지 말고 좌표에서 확인되는 속도 변화, 멈춤, 방향 전환, 공간 사용, 양팔의 관계 중 실제 근거가 있는 것만 연결한다.
+"초조한"은 짧고 급한 반복이나 멈칫하는 리듬이 만드는 장면의 인상으로 사용할 수 있다.
+"이 사람은 초조하다", "불안한 성격이다"처럼 마음 상태를 단정하지 말고 "초조한 장면의 표현처럼 읽힐 수 있다"처럼 움직임 표현으로만 서술한다.
+description은 감상하듯 자연스러운 두 문장으로 쓴다. "평균 속도 0.3", "방향 전환율", "정지 비율" 같은 숫자나 지표명은 description과 observations에 절대 나열하지 않는다.
+예를 들어 "잔잔하게 이어지는 팔의 흐름에 가벼운 스텝이 더해져 유연하고 경쾌한 인상을 줍니다. 짧게 머무는 순간이 다음 움직임을 기대하게 합니다."와 같은 방식이다. 이 예시의 동작을 데이터에 없는 채로 복사하지 않는다.
+지표만으로 확신을 만들지 말고 좌표에서 확인되는 속도 변화, 멈춤, 방향 전환, 공간 사용, 양팔·다리·몸통의 관계 중 실제 근거가 있는 것만 연결한다.
+웹캠에는 얼굴을 제외한 어깨, 팔꿈치, 손목, 손끝, 골반, 무릎, 발목, 뒤꿈치, 발끝이 최대 22개 제공된다.
+없는 관절이나 가려진 신체 부위의 움직임을 상상하지 않는다. 발이 관측되면 스텝과 다리 리듬도 읽고, 손목만 보고 전신 춤의 인상을 대신하지 않는다.
 정규화 좌표는 왼쪽 위 (0,0), 오른쪽 아래 (1,1), t와 durationMs는 밀리초다. 웹캠 좌표는 거울처럼 반전된 화면 좌표다.
 meanSpeed와 peakSpeed는 화면 대각선 길이를 1로 둔 초당 거리, pathLength는 화면 대각선 길이를 1로 둔 이동 거리다.
-stillnessRatio는 관측 시간 중 느린 움직임 비율, coverage는 궤적이 사용한 정규화 경계 상자 면적,
-spread는 화면 대각선 길이를 1로 둔 관절 간 퍼짐, tempoVariation은 속도의 표준편차/평균, directionChangeRate는 초당 방향 전환 횟수다.
-trackedDurationMs는 유효하게 추적한 시간, validFrameRatio는 유효 관측 비율이다. 모든 지표는 휴리스틱이며 정확한 신체량이 아니다.
+웹캠 meanSpeed와 pathLength는 매 순간 가장 활발한 상체·하체·몸통 부위의 움직임을 따른다. 움직이지 않는 팔 때문에 스텝이 묻히지 않도록 한 휴리스틱이다.
+upperBodySpeed는 관측된 양손목·양팔꿈치·양어깨 쌍 중 가장 활발한 쌍의 평균 이동 속도다.
+lowerBodySpeed는 관측된 양발목·양무릎·양골반 쌍 중 가장 활발한 쌍의 평균 이동 속도다. 두 지표 모두 매 순간 활발한 쌍을 선택한 뒤 시간 평균을 낸 값이다.
+torsoSpeed는 관측된 어깨·골반의 평균 이동 속도다. 해당 관절 관측이 없을 때도 0이므로, 값 0만으로 정지했다고 단정하지 않는다.
+stillnessRatio는 관측 시간 중 느린 움직임 비율, coverage는 궤적이 사용한 정규화 경계 상자 면적이다.
+웹캠 coverage는 각 관절이 연속 구간에서 실제 이동한 범위 중 최대 면적이며, 서 있는 몸이 차지하는 면적이 아니다.
+spread는 화면 대각선 길이를 1로 둔 관측 관절 간 퍼짐이다. 큰 spread만으로 역동적인 춤이라 부르지 않는다.
+tempoVariation은 속도의 표준편차/평균, directionChangeRate는 초당 방향 전환 횟수다.
+trackedDurationMs는 유효하게 추적한 시간, validFrameRatio는 유효 관측 비율, fullBodyRatio는 양어깨·골반·무릎·발목을 모두 관측한 프레임 비율이다.
+fullBodyRatio가 낮으면 보이는 부분만으로 읽었다고 짧게 밝힌다. 모든 지표는 휴리스틱이며 정확한 신체량이 아니다.
 웹캠 sample의 segment가 바뀌면 일시정지 또는 추적 손실 후 새 기록 구간이다. t는 정지 시간을 제외하므로 다른 segment 사이를 연결하거나 그 사이의 속도·방향을 추정하지 않는다.
 source가 pointer이면 손으로 그린 선만 관측한 것이므로 신체 자세나 춤을 보았다고 쓰지 않는다.
 source가 example이면 사람이 한 움직임이 아니라 합성 예시임을 description에 밝힌다.
 샘플 간 큰 시간 간격, 추적 손실, 짧은 기록은 해석의 불확실성으로 설명한다.
-impression은 짧은 대표 인상, description은 2~3문장, observations는 근거 1~4개, qualities는 짧은 표현어 1~4개다.
+impression은 짧은 대표 형용사 하나, description은 두 문장, observations는 일상 언어로 쓴 근거 1~4개, qualities는 서로 다른 짧은 형용사 정확히 3개다.
 caveat에는 "실제 감정이나 의도를 판정한 결과가 아닙니다."를 포함한다. 점수, 정확도, 진단, 사용자 의도와의 일치율은 만들지 않는다.
 명시된 JSON 스키마의 속성만 반환한다.`;
 
@@ -64,7 +84,8 @@ export function validateMotion(value) {
   const metrics = {};
   for (const [name, metric] of Object.entries(value.metrics)) {
     if (!METRICS.has(name) || !numberIn(metric, 0, 100000)) invalid();
-    if (['stillnessRatio', 'coverage', 'validFrameRatio'].includes(name) && metric > 1) invalid();
+    if (['stillnessRatio', 'coverage', 'validFrameRatio', 'fullBodyRatio'].includes(name) && metric > 1) invalid();
+    if (['upperBodySpeed', 'lowerBodySpeed', 'torsoSpeed'].includes(name) && metric > 125) invalid();
     metrics[name] = metric;
   }
   let previousTime = -1;

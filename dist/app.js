@@ -36,7 +36,7 @@
   let cameraDeviceId = '';
   let poseFrames = [];
   let poseSegment = 0;
-  let wristTracks = new Map();
+  let jointTracks = new Map();
   let analysis = null;
   let analysisKind = 'local';
   let motionReport = null;
@@ -240,10 +240,13 @@
     $('intent-summary').textContent = detail || (intendedFeeling ? '내가 이 움직임으로 표현하려던 느낌입니다.' : '표현하려던 느낌을 위에서 남겨주세요.');
     $('feeling-note').textContent = intendedFeeling || detail ? '의도를 남겼어요. 서버로 보내지 않고 이 화면에만 보관합니다.' : '단어를 고르거나 직접 적어주세요. 이 화면에만 남습니다.';
     const ai = analysisKind === 'ai';
-    $('analysis-badge').textContent = analysisBusy ? 'AI 해석 중' : ai ? 'Gemini 해석' : isExample ? '합성 예시 · 수치 분석' : '기본 수치 분석';
+    $('analysis-badge').textContent = analysisBusy ? 'AI 해석 중' : ai ? 'Gemini 해석' : isExample ? '합성 예시 · 기본 인상' : '기본 인상 · 규칙 기반';
     $('reading-label').textContent = ai ? '02 / AI READING' : '02 / MOVEMENT READING';
-    $('reading-title').textContent = ai ? 'AI가 읽은 인상' : '움직임의 특징';
+    $('reading-title').textContent = ai ? 'AI가 느낀 움직임' : '움직임에서 읽힌 인상';
     $('ai-word').textContent = analysis?.impression || '기록 전';
+    $('analysis-qualities').replaceChildren(...(analysis?.qualities || []).slice(0,4).map(text => {
+      const tag = document.createElement('span'); tag.textContent = text; return tag;
+    }));
     $('ai-summary').textContent = analysis?.description || '움직임을 남기면 분석이 시작됩니다.';
     $('analysis-status').textContent = analysisMessage;
     $('analysis-evidence').hidden = !analysis;
@@ -260,7 +263,7 @@
     } else {
       $('comparison-verdict').textContent = '내가 담은 느낌과 읽힌 인상';
       $('comparison-explanation').textContent = '나는 ‘' + (intendedFeeling || detail) + '’을 담았고, ' +
-        (ai ? 'AI는' : '수치 분석은') + ' ‘' + (analysis?.impression || '분석 대기') +
+        (ai ? 'AI는' : '기본 해석은') + ' ‘' + (analysis?.impression || '분석 대기') +
         '’을 보여줍니다. 움직임에서 읽은 근거와 내 의도 사이에 어떤 차이가 있나요?';
     }
   }
@@ -274,6 +277,7 @@
     motionReport = null;
     analysisKind = 'local';
     analysisMessage = '';
+    $('analysis-evidence').open = false;
   }
 
   function analyzeMovement() {
@@ -281,7 +285,7 @@
     analysis = motionReport.local;
     analysisKind = 'local';
     analysisMessage = motionReport.sufficient
-      ? '현재 기록의 속도·멈춤·공간 사용을 계산한 기본 분석입니다. 생성형 AI 해석과는 구분됩니다.'
+      ? '움직임의 특징을 표현어로 바꾼 기본 인상입니다. AI 해석을 누르면 더 풍부한 감상을 볼 수 있어요.'
       : '분석할 움직임이 짧거나 인식한 관절이 부족합니다. 1초 이상 움직임을 남겨주세요.';
     updateComparison();
     if ($('ai-consent').checked && motionReport.sufficient && !isExample) requestAI();
@@ -295,7 +299,7 @@
       return configured;
     }
     if (['localhost','127.0.0.1','[::1]'].includes(location.hostname)) return '';
-    throw new Error('AI 서버가 아직 연결되지 않았습니다. 현재는 기본 수치 분석을 볼 수 있어요. Gemini 키와 서버 연결 후 AI 해석이 켜집니다.');
+    throw new Error('AI 서버가 아직 연결되지 않았습니다. 현재는 규칙 기반 기본 인상을 볼 수 있어요. Gemini 키와 서버 연결 후 AI 해석이 켜집니다.');
   }
 
   async function requestAI() {
@@ -334,7 +338,7 @@
       analysisMessage = (error.name === 'AbortError'
         ? 'AI 응답 시간이 길어져 요청을 멈췄습니다. 다시 시도할 수 있어요.'
         : error instanceof TypeError ? 'AI 서버에 연결하지 못했습니다. 인터넷 연결과 서버 설정을 확인해주세요.' : error.message) +
-        (analysisKind === 'ai' ? ' 앞서 받은 해석을 유지합니다.' : ' 아래 결과는 기본 수치 분석입니다.');
+        (analysisKind === 'ai' ? ' 앞서 받은 해석을 유지합니다.' : ' 아래 결과는 규칙 기반 기본 인상입니다.');
     } finally {
       clearTimeout(timeout);
       clearTimeout(waitingNotice);
@@ -399,7 +403,7 @@
     } else if(mode === 'armed') {
       if (captureSource === 'webcam') {
         $('guide-title').textContent = cameraKind === 'error' ? '카메라 연결을 확인해 주세요.' : cameraReady ? (cameraRequested ? '당신의 움직임을 기다려요.' : '몸으로 남기는, 작은 잔상.') : '움직임을 만날 준비 중';
-        $('guide-copy').textContent = cameraKind === 'error' ? '왼쪽에서 카메라를 바꾸거나 다시 연결할 수 있어요.' : cameraRequested ? '어깨와 손을 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.' : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
+        $('guide-copy').textContent = cameraKind === 'error' ? '왼쪽에서 카메라를 바꾸거나 다시 연결할 수 있어요.' : cameraRequested ? '어깨부터 양발까지 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.' : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
       } else {
         $('guide-title').textContent = hasPoints ? '움직임을 이어가볼까요?' : '여기서, 당신의 움직임을.';
         $('guide-copy').textContent = '마우스나 손가락을 누른 채 움직여보세요.';
@@ -424,7 +428,7 @@
     points=[];
     poseFrames=[];
     poseSegment=0;
-    wristTracks.clear();
+    jointTracks.clear();
     captureSource=inputMode;
     isExample=false;
     elapsed=0;cursor=0;duration=LIMIT;stroke=0;
@@ -435,7 +439,7 @@
     refresh();render();
     canvas.focus({preventScroll:true});
     $('drawing-hint').textContent = captureSource === 'webcam'
-      ? '양손목으로 잔상을 남겨보세요 · 몸을 놓치면 시간도 멈춥니다'
+      ? '양손·양발·몸의 중심으로 잔상을 남겨보세요 · 전신이 보여야 기록됩니다'
       : '누른 채 움직여보세요 · 손을 떼면 새로운 획 · Space 일시정지';
     if (captureSource === 'webcam') startCamera();
     else announce('무대를 누르면 기록이 시작됩니다. 최대 10초이며, 일시정지할 수 있습니다.');
@@ -456,7 +460,7 @@
     camera = null;
     cameraReady = false;
     cameraRequested = false;
-    wristTracks.clear();
+    jointTracks.clear();
     $('camera-panel').hidden = true;
   }
 
@@ -464,7 +468,7 @@
     const id = takeId;
     camera?.stop();
     camera = null;
-    wristTracks.clear();
+    jointTracks.clear();
     cameraKind = 'loading';
     cameraMessage = '카메라와 자세 인식 모델을 준비하고 있어요.';
     cameraReady = false;
@@ -521,18 +525,23 @@
 
   function receivePose({landmarks, timestamp:now}) {
     if (view !== 'drawing' || captureSource !== 'webcam' || !cameraRequested || lost || mode === 'paused') return;
-    const jointIndices = {leftShoulder:11,rightShoulder:12,leftElbow:13,rightElbow:14,leftWrist:15,rightWrist:16,leftHip:23,rightHip:24};
+    const jointIndices = {
+      leftShoulder:11,rightShoulder:12,leftElbow:13,rightElbow:14,leftWrist:15,rightWrist:16,
+      leftPinky:17,rightPinky:18,leftIndex:19,rightIndex:20,leftThumb:21,rightThumb:22,
+      leftHip:23,rightHip:24,leftKnee:25,rightKnee:26,leftAnkle:27,rightAnkle:28,
+      leftHeel:29,rightHeel:30,leftFootIndex:31,rightFootIndex:32
+    };
     const joints = {};
     for (const [name,index] of Object.entries(jointIndices)) {
       const p = landmarks[index];
       if (p && p.visibility >= .5) joints[name] = [clamp(p.x,0,1), clamp(p.y,0,1)];
     }
-    if (!joints.leftShoulder || !joints.rightShoulder || (!joints.leftWrist && !joints.rightWrist)) {
+    if (['leftShoulder','rightShoulder','leftHip','rightHip','leftAnkle','rightAnkle'].some(name => !joints[name])) {
       if (mode === 'recording') {
         elapsed = recordTime(now);
         cursor = elapsed;
         mode = 'armed';
-        wristTracks.clear();
+        jointTracks.clear();
         refresh();
       }
       return;
@@ -541,20 +550,25 @@
       startedAt = now;
       mode = 'recording';
       poseSegment++;
-      wristTracks.clear();
+      jointTracks.clear();
     }
     if (mode !== 'recording') return;
     const t = recordTime(now);
     if (!poseFrames.length || t > poseFrames[poseFrames.length-1].t) poseFrames.push({t,joints,segment:poseSegment});
-    for (const joint of ['leftWrist','rightWrist']) {
-      if (!joints[joint]) { wristTracks.delete(joint); continue; }
-      const [x,y] = joints[joint];
-      const prev = wristTracks.get(joint);
+    // Five traces keep the dance readable; all 22 body joints remain in the analysis.
+    const traceJoints = {...joints, bodyCenter:[
+      (joints.leftHip[0] + joints.rightHip[0])/2,
+      (joints.leftHip[1] + joints.rightHip[1])/2
+    ]};
+    for (const joint of ['leftWrist','rightWrist','leftAnkle','rightAnkle','bodyCenter']) {
+      if (!traceJoints[joint]) { jointTracks.delete(joint); continue; }
+      const [x,y] = traceJoints[joint];
+      const prev = jointTracks.get(joint);
       const connected = prev && t > prev.t && t-prev.t < 350;
       const p = {x,y,t,stroke:connected ? prev.stroke : ++stroke,speed:0};
       if (connected) p.speed = prev.speed*.5 + Math.hypot((x-prev.x)*captureAspect,y-prev.y)/((t-prev.t)/1000)*.5;
       points.push(p);
-      wristTracks.set(joint,p);
+      jointTracks.set(joint,p);
     }
     cursor = t;
     dirty = true;
@@ -590,7 +604,7 @@
     releasePointer();
     if(elapsed>=LIMIT) { finishRecording();return; }
     mode='paused';dirty=true;refresh();
-    wristTracks.clear();
+    jointTracks.clear();
     announce('기록을 일시정지했습니다. 멈춘 시간은 기록에 포함되지 않습니다.');
   }
 
@@ -608,7 +622,7 @@
     setView('result');
     $('result-duration').textContent=(duration/1000).toFixed(1);
     $('result-strokes').textContent=new Set(points.map(p=>p.stroke)).size;
-    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.' : captureSource === 'webcam' ? '양손목이 지나간 잔상입니다. 원본 영상은 저장하지 않았어요.' : '재생 버튼을 눌러, 당신이 남긴 리듬을 다시 만나보세요.';
+    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.' : captureSource === 'webcam' ? '양손·양발·몸의 중심이 남긴 잔상입니다. 얼굴 좌표와 영상은 기록하지 않았어요.' : '재생 버튼을 눌러, 당신이 남긴 리듬을 다시 만나보세요.';
     openResult();
     $('result-panel').scrollTop = 0;
     workspace.scrollTop = 0;

@@ -80,6 +80,7 @@ test('mirrors normalized joints, throttles inference, and releases camera resour
   f.frame(100);
   assert.equal(f.frames.length, 1);
   assert.equal(f.frames[0].landmarks.length, 33);
+  assert.ok(f.frames[0].landmarks.slice(0, 11).every(point => point === null));
   assert.equal(f.frames[0].landmarks[15].x, 0.75);
   assert.equal(f.video.style.transform, 'scaleX(-1)');
   f.video.currentTime = 1;
@@ -107,12 +108,68 @@ test('lost or occluded pose emits an empty frame and breaks smoothing history', 
   assert.equal(f.statuses.at(-1).kind, 'missing');
   assert.equal(f.camera._smoothed, null);
   const occluded = Array.from({ length: 33 }, () => ({ x: 0.25, y: 0.4, z: 0, visibility: 0.9 }));
-  occluded[15].visibility = 0.2;
-  occluded[16].visibility = 0.2;
+  occluded[27].visibility = 0.2;
+  occluded[28].visibility = 0.2;
   f.setRaw(occluded);
   f.video.currentTime = 2;
   f.frame(300);
   assert.equal(f.frames.at(-1).landmarks.length, 0);
+  f.camera.stop();
+});
+
+test('full body stays valid with missing, malformed, or extreme facial landmarks', async () => {
+  const f = fixture();
+  await f.camera.start();
+  const raw = Array.from({ length: 33 }, () => ({ x: 0.25, y: 0.4, z: 0, visibility: 0.9 }));
+  raw[0] = null;
+  raw[1] = undefined;
+  raw[2] = { x: Infinity, y: NaN, z: -Infinity, visibility: 1 };
+  raw[3] = { x: 10000, y: -10000, z: 1e20, visibility: 1 };
+  // A face slot is never read: discarding must happen before any filtering.
+  Object.defineProperty(raw, 4, { get() { throw new Error('Facial slot was accessed'); } });
+  f.setRaw(raw);
+  f.frame(100);
+  assert.equal(f.frames.length, 1);
+  assert.equal(f.frames[0].landmarks.length, 33);
+  assert.ok(f.frames[0].landmarks.slice(0, 11).every(point => point === null));
+  assert.ok(f.camera._smoothed.slice(0, 11).every(point => point === null));
+  assert.equal(f.frames[0].landmarks[28].visibility, 0.9);
+  assert.equal(f.statuses.at(-1).kind, 'tracking');
+  f.camera.stop();
+});
+
+test('occluded wrists do not stop a full-body dance or footwork recording', async () => {
+  const f = fixture();
+  await f.camera.start();
+  const raw = Array.from({ length: 33 }, () => ({ x: 0.25, y: 0.4, z: 0, visibility: 0.9 }));
+  raw[15].visibility = 0.1;
+  raw[16] = null;
+  f.setRaw(raw);
+  f.frame(100);
+  const points = f.frames[0].landmarks;
+  assert.equal(points.length, 33);
+  assert.equal(points[15].visibility, 0.1);
+  assert.equal(points[16].visibility, 0);
+  assert.equal(points[27].visibility, 0.9);
+  assert.equal(f.statuses.at(-1).kind, 'tracking');
+  f.camera.stop();
+});
+
+test('missing or out-of-frame required body joints pause full-body recording', async () => {
+  const f = fixture();
+  await f.camera.start();
+  let timestamp = 0;
+  for (const index of [11, 12, 23, 24, 27, 28]) {
+    for (const invalid of [null, { x: 0.5, y: 1.2, visibility: 0.9 }, { x: 0.5, y: 0.5, visibility: 0.2 }]) {
+      const raw = Array.from({ length: 33 }, () => ({ x: 0.25, y: 0.4, z: 0, visibility: 0.9 }));
+      raw[index] = invalid;
+      f.setRaw(raw);
+      f.video.currentTime++;
+      f.frame(timestamp += 100);
+      assert.equal(f.frames.at(-1).landmarks.length, 0, `Joint ${index} must be present and visible`);
+      assert.equal(f.camera._smoothed, null);
+    }
+  }
   f.camera.stop();
 });
 

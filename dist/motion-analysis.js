@@ -8,10 +8,22 @@
   'use strict';
 
   const JOINTS = [
-    'leftWrist', 'rightWrist', 'leftElbow', 'rightElbow',
-    'leftShoulder', 'rightShoulder', 'leftHip', 'rightHip'
+    'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow',
+    'leftWrist', 'rightWrist', 'leftPinky', 'rightPinky',
+    'leftIndex', 'rightIndex', 'leftThumb', 'rightThumb',
+    'leftHip', 'rightHip', 'leftKnee', 'rightKnee',
+    'leftAnkle', 'rightAnkle', 'leftHeel', 'rightHeel',
+    'leftFootIndex', 'rightFootIndex'
   ];
-  const WRISTS = ['leftWrist', 'rightWrist'];
+  const UPPER_GROUPS = [
+    ['leftWrist', 'rightWrist'], ['leftElbow', 'rightElbow'], ['leftShoulder', 'rightShoulder']
+  ];
+  const LOWER_GROUPS = [
+    ['leftAnkle', 'rightAnkle'], ['leftKnee', 'rightKnee'], ['leftHip', 'rightHip']
+  ];
+  const TORSO = ['leftShoulder', 'rightShoulder', 'leftHip', 'rightHip'];
+  const FULL_BODY = [...TORSO, 'leftKnee', 'rightKnee', 'leftAnkle', 'rightAnkle'];
+  const MOTION_JOINTS = [...UPPER_GROUPS.flat(), ...LOWER_GROUPS.flat()];
   const MIN_INTERVAL_MS = 8;
   const MAX_INTERVAL_MS = 250;
   const STILL_SPEED = 0.055;
@@ -80,28 +92,31 @@
     const vector = (a, b) => [(b[0] - a[0]) * aspect / diagonal, (b[1] - a[1]) / diagonal];
     const length = (v) => Math.hypot(v[0], v[1]);
     const positions = [];
+    const jointBounds = new Map();
+    const activeBounds = {};
     const intervals = [];
     const spreads = [];
     let previous = null;
     let directions = {};
-    let turnCount = 0;
-    let turnOpportunities = 0;
+    let weightedTurns = 0;
     let validFrames = 0;
+    let fullBodyFrames = 0;
+    let boundsId = 0;
 
     for (const frame of data) {
       const joints = source === 'webcam' ? frame.joints : { pointer: [frame.x, frame.y] };
-      const names = source === 'webcam' ? WRISTS : ['pointer'];
+      const names = source === 'webcam' ? MOTION_JOINTS : ['pointer'];
       const observed = names.filter((name) => joints[name]);
       if (observed.length) validFrames += 1;
-      for (const name of observed) positions.push(joints[name]);
+      if (source === 'webcam' && FULL_BODY.every((name) => joints[name])) fullBodyFrames += 1;
 
       if (source === 'webcam') {
-        const upperBody = JOINTS.filter((name) => !name.endsWith('Hip') && joints[name]);
-        if (upperBody.length >= 2) {
+        const body = observed;
+        if (body.length >= 2) {
           let spread = 0;
-          for (let i = 0; i < upperBody.length; i += 1) {
-            for (let j = i + 1; j < upperBody.length; j += 1) {
-              spread = Math.max(spread, length(vector(joints[upperBody[i]], joints[upperBody[j]])));
+          for (let i = 0; i < body.length; i += 1) {
+            for (let j = i + 1; j < body.length; j += 1) {
+              spread = Math.max(spread, length(vector(joints[body[i]], joints[body[j]])));
             }
           }
           spreads.push(spread);
@@ -111,41 +126,76 @@
       const dt = previous ? frame.t - previous.t : 0;
       const sameSegment = previous && (source === 'webcam'
         ? previous.segment === frame.segment : previous.stroke === frame.stroke);
-      if (!previous || !sameSegment || dt < MIN_INTERVAL_MS || dt > MAX_INTERVAL_MS) {
+      const continuous = sameSegment && dt >= MIN_INTERVAL_MS && dt <= MAX_INTERVAL_MS;
+      const previousJoints = previous
+        ? source === 'webcam' ? previous.joints : { pointer: [previous.x, previous.y] }
+        : {};
+      // A body already occupies space while standing. Coverage measures each
+      // joint's travel, never the rectangle between separate, stationary limbs.
+      for (const name of observed) {
+        if (source !== 'webcam') {
+          positions.push(joints[name]);
+          continue;
+        }
+        if (!continuous || !previousJoints[name]) {
+          activeBounds[name] = boundsId++;
+          jointBounds.set(activeBounds[name], [...joints[name], ...joints[name]]);
+        }
+        const bounds = jointBounds.get(activeBounds[name]);
+        bounds[0] = Math.min(bounds[0], joints[name][0]);
+        bounds[1] = Math.min(bounds[1], joints[name][1]);
+        bounds[2] = Math.max(bounds[2], joints[name][0]);
+        bounds[3] = Math.max(bounds[3], joints[name][1]);
+      }
+      if (!continuous) {
         directions = {};
         previous = frame;
         continue;
       }
-      const previousJoints = source === 'webcam' ? previous.joints : { pointer: [previous.x, previous.y] };
-      const speeds = [];
-      const distances = [];
+      const motions = {};
       const nextDirections = {};
       for (const name of observed) {
         if (!previousJoints[name]) continue;
         const delta = vector(previousJoints[name], joints[name]);
         const distance = length(delta);
         const speed = distance / (dt / 1000);
-        speeds.push(speed);
-        distances.push(distance);
+        motions[name] = { speed, distance, turn: 0 };
         if (speed >= STILL_SPEED) {
           const direction = delta.map((value) => value / distance);
           if (directions[name]) {
             const cosine = direction[0] * directions[name][0] + direction[1] * directions[name][1];
-            turnOpportunities += 1;
-            if (cosine < 0.5) turnCount += 1; // At least a 60-degree direction change.
+            if (cosine < 0.5) motions[name].turn = 1; // At least a 60-degree direction change.
           }
           nextDirections[name] = direction;
         }
       }
       directions = nextDirections;
-      if (speeds.length) {
-        // Average simultaneously observed wrists so two hands do not double the speed or time.
+      const group = (groups) => {
+        const available = groups.map((names) => names.filter((name) => motions[name]))
+          .filter((names) => names.length).map((selected) => ({
+            speed: selected.reduce((sum, name) => sum + motions[name].speed, 0) / selected.length,
+            distance: selected.reduce((sum, name) => sum + motions[name].distance, 0) / selected.length,
+            turns: selected.reduce((sum, name) => sum + motions[name].turn, 0) / selected.length
+          }));
+        return available.length
+          ? available.reduce((best, current) => current.speed > best.speed ? current : best) : null;
+      };
+      const upper = source === 'webcam' ? group(UPPER_GROUPS) : null;
+      const lower = source === 'webcam' ? group(LOWER_GROUPS) : null;
+      const torso = source === 'webcam' ? group([TORSO]) : null;
+      const available = source === 'webcam'
+        ? [upper, lower, torso].filter(Boolean) : [group([['pointer']])].filter(Boolean);
+      if (available.length) {
+        // Use the most active body region. Stationary arms must not conceal
+        // footwork; adding two equally moving limbs must not double activity.
+        const active = available.reduce((best, current) => current.speed > best.speed ? current : best);
+        weightedTurns += active.turns;
         intervals.push({
           dt,
-          speed: speeds.reduce((sum, value) => sum + value, 0) / speeds.length,
-          peak: Math.max(...speeds),
-          distance: distances.reduce((sum, value) => sum + value, 0) / distances.length,
-          joints: speeds.length
+          speed: active.speed,
+          peak: Math.max(...Object.values(motions).map((entry) => entry.speed)),
+          distance: active.distance,
+          upper, lower, torso
         });
       }
       previous = frame;
@@ -164,27 +214,37 @@
       width = Math.max(...xs) - Math.min(...xs);
       height = Math.max(...ys) - Math.min(...ys);
     }
-    const meanJointCount = intervals.length
-      ? intervals.reduce((sum, entry) => sum + entry.joints, 0) / intervals.length : 1;
+    const bodyCoverage = [...jointBounds.values()].reduce((area, bounds) =>
+      Math.max(area, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])), 0);
     const metrics = {
       meanSpeed,
       peakSpeed: intervals.reduce((peak, entry) => Math.max(peak, entry.peak), 0),
       stillnessRatio: trackedDurationMs
         ? intervals.filter((entry) => entry.speed < STILL_SPEED).reduce((sum, entry) => sum + entry.dt, 0) / trackedDurationMs : 0,
-      coverage: width * height,
+      coverage: source === 'webcam' ? bodyCoverage : width * height,
       spread: spreads.length
         ? spreads.reduce((sum, value) => sum + value, 0) / spreads.length
         : Math.hypot(width * aspect, height) / diagonal,
       tempoVariation: meanSpeed > 0.005 ? Math.sqrt(variance) / meanSpeed : 0,
-      directionChangeRate: trackedDurationMs && turnOpportunities
-        ? turnCount / meanJointCount / (trackedDurationMs / 1000) : 0,
+      directionChangeRate: trackedDurationMs ? weightedTurns / (trackedDurationMs / 1000) : 0,
       pathLength: intervals.reduce((sum, entry) => sum + entry.distance, 0),
       trackedDurationMs,
       validFrameRatio: data.length ? validFrames / data.length : 0
     };
+    if (source === 'webcam') {
+      const meanGroupSpeed = (name) => {
+        const recorded = intervals.filter((entry) => entry[name]);
+        const duration = recorded.reduce((sum, entry) => sum + entry.dt, 0);
+        return duration ? recorded.reduce((sum, entry) => sum + entry[name].speed * entry.dt, 0) / duration : 0;
+      };
+      metrics.upperBodySpeed = meanGroupSpeed('upper');
+      metrics.lowerBodySpeed = meanGroupSpeed('lower');
+      metrics.torsoSpeed = meanGroupSpeed('torso');
+      metrics.fullBodyRatio = data.length ? fullBodyFrames / data.length : 0;
+    }
     for (const key of Object.keys(metrics)) metrics[key] = round(metrics[key]);
     const validData = source === 'webcam'
-      ? data.filter((frame) => WRISTS.some((name) => frame.joints[name])) : data;
+      ? data.filter((frame) => MOTION_JOINTS.some((name) => frame.joints[name])) : data;
     const span = validData.length ? validData[validData.length - 1].t - validData[0].t : 0;
     return {
       metrics,
@@ -193,12 +253,12 @@
   }
 
   function describe(metrics, sufficient, source) {
-    const caveat = '속도·범위·방향 변화로 정리한 움직임의 특징입니다. 실제 감정이나 의도를 판단한 결과가 아닙니다.';
+    const caveat = '측정한 움직임을 간단한 규칙으로 표현한 기본 인상입니다. 실제 감정이나 의도를 판단한 결과가 아닙니다.';
     if (!sufficient) {
       return {
         impression: '조금 더 긴 움직임이 필요해요',
         description: source === 'webcam'
-          ? '손목이 화면에 보이도록 1초 이상 움직여 주세요. 인식된 연속 구간이 짧아 특징을 비교하기 어렵습니다.'
+          ? '어깨부터 발끝까지 화면에 보이도록 1초 이상 움직여 주세요. 인식된 연속 구간이 짧아 움직임의 인상을 읽기 어렵습니다.'
           : '1초 이상 궤적을 그려 주세요. 기록된 연속 구간이 짧아 특징을 비교하기 어렵습니다.',
         observations: ['연속해서 측정할 수 있는 움직임이 부족합니다.'],
         qualities: [],
@@ -206,50 +266,63 @@
       };
     }
     const observations = [];
-    const qualities = [];
+    const fast = metrics.meanSpeed >= 0.65;
+    const slow = metrics.meanSpeed < 0.2;
+    const turns = metrics.directionChangeRate >= 1.3;
+    const contrast = metrics.tempoVariation >= 0.8 && metrics.meanSpeed >= STILL_SPEED;
+    const still = metrics.stillnessRatio >= 0.7;
+    const wide = metrics.coverage >= 0.18;
+    const footLed = source === 'webcam' && metrics.lowerBodySpeed > metrics.upperBodySpeed * 1.5 &&
+      metrics.lowerBodySpeed >= 0.2;
+    const impression = still ? '차분한'
+      : turns && contrast ? '초조한'
+        : contrast && metrics.stillnessRatio >= 0.25 ? '머뭇거리는'
+          : turns ? '날카로운'
+            : fast ? '빠른'
+              : footLed ? '경쾌한'
+                : slow ? '차분한' : '유연한';
+    const qualities = [...new Set([
+      impression,
+      fast ? '빠른' : slow || still ? '차분한' : '유연한',
+      turns ? '날카로운' : contrast ? '머뭇거리는' : '매끄러운',
+      wide ? '시원한' : footLed ? '경쾌한' : '섬세한'
+    ])].slice(0, 3);
+    const atmosphere = {
+      '차분한': '잔잔하게 머물며 호흡을 고르는 듯한 인상을 줍니다.',
+      '초조한': '툭툭 끊기고 서두르는 리듬이 초조한 장면의 표현처럼 읽힐 수 있습니다.',
+      '머뭇거리는': '나아가다가 잠시 주저하는 듯한, 머뭇거리는 인상을 줍니다.',
+      '날카로운': '움직임이 선명하게 꺾이며 날카로운 리듬을 만드는 듯합니다.',
+      '빠른': '빠르게 흘러가는 움직임에서 추진력과 생동감이 느껴집니다.',
+      '경쾌한': '하체에서 시작되는 리듬이 가볍고 경쾌한 인상을 줍니다.',
+      '유연한': '끊기지 않고 이어지는 흐름이 유연하게 물결치는 듯합니다.'
+    };
+    const detail = still ? '작은 변화와 여백이 조용한 분위기를 만듭니다.'
+      : footLed ? '팔보다 다리의 흐름이 두드러져, 하체가 장면의 리듬을 이끄는 듯합니다.'
+        : wide ? '넓게 뻗어나가는 자취가 시원한 공간감을 더합니다.'
+          : contrast ? '밀고 나가는 순간과 숨을 고르는 순간이 번갈아 나타납니다.'
+            : '이어지는 자취가 하나의 리듬을 남깁니다.';
+    const prefix = source === 'example' ? '합성 예시의 궤적을 보면, ' : '';
     if (metrics.stillnessRatio >= 0.7) {
-      qualities.push('작은 움직임');
-      observations.push('측정한 시간의 대부분에서 움직임의 변화가 작았습니다.');
-    } else if (metrics.meanSpeed >= 0.65) {
-      qualities.push('빠른 움직임');
-      observations.push('화면 크기에 비해 손 또는 궤적이 빠르게 이동했습니다.');
-    } else if (metrics.meanSpeed < 0.2) {
-      qualities.push('느린 움직임');
-      observations.push('화면 안에서 비교적 천천히 이동했습니다.');
+      observations.push('움직임 사이에 머무는 여백이 길게 보입니다.');
+    } else if (fast) {
+      observations.push('자취가 빠르게 이어지며 속도감이 두드러집니다.');
+    } else if (slow) {
+      observations.push('서두르지 않고 천천히 이어지는 흐름이 보입니다.');
     } else {
-      qualities.push('꾸준한 움직임');
-      observations.push('화면 안에서 중간 정도의 속도로 이동했습니다.');
+      observations.push('움직임이 무리 없이 이어지는 흐름을 보입니다.');
     }
-    if (metrics.spread >= 0.5 || metrics.coverage >= 0.3) {
-      qualities.push('넓은 범위');
-      observations.push(source === 'webcam'
-        ? '팔과 손이 비교적 넓게 펼쳐지거나 넓은 영역을 오갔습니다.'
-        : '궤적이 화면의 넓은 범위까지 뻗었습니다.');
-    } else if (metrics.spread < 0.2 && metrics.coverage < 0.08) {
-      qualities.push('좁은 범위');
-      observations.push('움직임이 화면의 작은 영역에 모였습니다.');
+    if (footLed) observations.push('팔의 움직임보다 하체의 흐름이 더 두드러집니다.');
+    if (wide) observations.push('한곳에 모이기보다 넓게 뻗어나가는 자취가 보입니다.');
+    if (turns) observations.push('방향을 바꾸는 순간이 반복되어 꺾이는 리듬을 만듭니다.');
+    if (contrast) observations.push('빠르게 흐르는 순간과 머무는 순간이 대비됩니다.');
+    else if (!still) observations.push('속도의 흐름이 비교적 고르게 이어집니다.');
+    if (source === 'webcam' && metrics.fullBodyRatio < 0.5) {
+      observations.push('화면에 잡힌 몸의 일부만으로 읽은 인상입니다.');
     }
-    if (metrics.directionChangeRate >= 1.3) {
-      qualities.push('잦은 방향 전환');
-      observations.push('진행 방향이 반복해서 바뀌었습니다.');
-    }
-    if (metrics.tempoVariation >= 0.8 && metrics.meanSpeed >= 0.055) {
-      qualities.push('속도의 대비');
-      observations.push('빠른 구간과 느린 구간의 차이가 나타났습니다.');
-    } else if (metrics.stillnessRatio < 0.7) {
-      qualities.push('고른 속도');
-      observations.push('기록한 구간의 속도가 비교적 고르게 이어졌습니다.');
-    }
-    const impression = metrics.stillnessRatio >= 0.7 ? '작게 머무르는'
-      : metrics.meanSpeed >= 0.65 && metrics.directionChangeRate >= 1.3 ? '빠르게 전환되는'
-        : metrics.spread >= 0.5 || metrics.coverage >= 0.3 ? '크게 펼쳐지는'
-          : metrics.tempoVariation >= 0.8 ? '속도가 달라지는'
-            : metrics.meanSpeed >= 0.65 ? '빠르게 흐르는'
-              : metrics.meanSpeed < 0.2 ? '차분히 이어지는' : '고르게 이어지는';
     return {
       impression,
-      description: observations.slice(0, 2).join(' '),
-      observations,
+      description: prefix + atmosphere[impression] + ' ' + detail,
+      observations: observations.slice(0, 4),
       qualities,
       caveat
     };

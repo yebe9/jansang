@@ -63,6 +63,10 @@ test('only bounded numeric movements are accepted; intention and raw images are 
     data => { data.samples[1].segment = 1.5; },
     data => { data.samples[1].segment = 10001; },
     data => { data.samples[1].segment = 'paused'; },
+    data => { data.metrics.fullBodyRatio = 1.1; },
+    data => { data.metrics.lowerBodySpeed = 126; },
+    data => { data.metrics.upperBodySpeed = -1; },
+    data => { data.metrics.torsoSpeed = 'fast'; },
   ]) {
     const bad = motion(); mutate(bad);
     const response = await handleApi(request(bad), { env, fetchImpl: noFetch });
@@ -71,6 +75,47 @@ test('only bounded numeric movements are accepted; intention and raw images are 
   assert.throws(() => validateMotion({ ...motion(), metrics: { meanSpeed: NaN } }));
   const tooBig = await handleApi(request({ padding: 'x'.repeat(102401) }), { env, fetchImpl: noFetch });
   assert.equal(tooBig.status, 413);
+});
+
+test('full-body numeric samples reach Gemini while face coordinates are rejected', async () => {
+  const { handleApi, validateMotion, MAX_BODY_BYTES } = await handler;
+  const { analyze } = require('../dist/motion-analysis.js');
+  const parts = ['Shoulder', 'Elbow', 'Wrist', 'Pinky', 'Index', 'Thumb', 'Hip', 'Knee', 'Ankle', 'Heel', 'FootIndex'];
+  const names = parts.flatMap((part) => ['left' + part, 'right' + part]);
+  const poseFrames = Array.from({ length: 151 }, (_, i) => ({
+    t: i * 66, segment: i < 75 ? 0 : 1,
+    joints: Object.fromEntries(names.map((name, n) => [name, [
+      0.5 + 0.1 * Math.sin(i * 0.2 + n),
+      0.1 + n / 30
+    ]]))
+  }));
+  const report = analyze({ source: 'webcam', poseFrames, durationMs: 10000, captureAspect: 16 / 9 });
+  assert.equal(report.sufficient, true);
+  assert.equal(report.payload.metrics.fullBodyRatio, 1);
+  assert.ok(report.payload.metrics.lowerBodySpeed > 0);
+  assert.ok(report.payload.metrics.upperBodySpeed > 0);
+  assert.ok(report.payload.metrics.torsoSpeed > 0);
+  assert.equal(Object.keys(report.payload.samples[0].joints).length, 22);
+  assert.ok(Buffer.byteLength(JSON.stringify(report.payload), 'utf8') < MAX_BODY_BYTES);
+  assert.deepEqual(validateMotion(report.payload), report.payload);
+  const response = await handleApi(request(report.payload), { env, fetchImpl: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), report.payload);
+    assert.match(body.systemInstruction.parts[0].text, /스텝과 다리 리듬/);
+    assert.match(body.systemInstruction.parts[0].text, /숫자나 지표명은 description과 observations에 절대 나열하지 않는다/);
+    assert.match(body.systemInstruction.parts[0].text, /"초조한".*장면의 인상/);
+    assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 3);
+    assert.equal(body.generationConfig.responseSchema.properties.qualities.maxItems, 3);
+    return goodResponse();
+  } });
+  assert.equal(response.status, 200);
+  for (const face of ['nose', 'leftEye', 'rightEye', 'leftEar', 'mouthLeft']) {
+    const faceMotion = motion();
+    faceMotion.samples[0].joints[face] = [0.5, 0.1];
+    const rejected = await handleApi(request(faceMotion), { env, fetchImpl: noFetch });
+    assert.equal(rejected.status, 400, face + ' must not reach Gemini');
+    assert.equal((await rejected.json()).error.code, 'INVALID_MOTION');
+  }
 });
 
 test('pause segment identifiers survive validation and reach the model', async () => {

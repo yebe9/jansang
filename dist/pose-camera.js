@@ -9,9 +9,10 @@
  * Both should fill the same box. This module uses object-fit: contain, mirrors
  * the video, and paints the matching mirrored skeleton into the overlay.
  * onFrame({ landmarks, timestamp }): <= 15 callbacks/sec, performance.now() in ms;
- * landmarks is a fresh array of 33 { x, y, z, visibility } objects in MediaPipe
- * index order. x is mirrored; x/y are clamped to [0, 1]. Low-confidence / absent
- * people produce []. Consumers must also check each joint's visibility >= 0.5.
+ * landmarks is a fresh array in MediaPipe's 33-slot index order. Slots 0–10
+ * (face) are always null; slots 11–32 contain { x, y, z, visibility } for the
+ * body. x is mirrored; x/y are clamped to [0, 1]. Missing shoulders, hips, or
+ * ankles produce []. Consumers must check each joint's visibility >= 0.5.
  * onStatus({ kind, message }): loading | ready | tracking | missing | error.
  * onDevices({ devices, selectedDeviceId }): video inputs after permission;
  * devices contains only { deviceId, label }. Selection stays in this session.
@@ -19,22 +20,26 @@
  * stop() is idempotent, including during pending permission or model downloads.
  *
  * Frames stay in the browser. No video recording, audio, upload, or storage.
+ * MediaPipe internally estimates 33 landmarks, including the face. Facial
+ * coordinates are discarded before smoothing, drawing, or onFrame callbacks.
  * This module only downloads the public library/WASM/model assets below.
  * MediaPipe Tasks Vision is Apache-2.0:
  * https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE
  * API: https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker/web_js
- * Synchronous inference is throttled on the main thread, using the Lite model
+ * Synchronous inference is throttled on the main thread, using the Full model
  * and a small camera frame. A worker is a future performance improvement.
  */
 (() => {
   'use strict';
 
   const PACKAGE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32';
-  const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+  const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task';
   const FRAME_INTERVAL = 1000 / 15;
   const MIN_VISIBILITY = 0.5;
   const BODY_CONNECTIONS = [
     [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+    [15, 17], [15, 19], [15, 21], [17, 19],
+    [16, 18], [16, 20], [16, 22], [18, 20],
     [11, 23], [12, 24], [23, 24], [23, 25], [25, 27],
     [24, 26], [26, 28], [27, 29], [29, 31], [27, 31],
     [28, 30], [30, 32], [28, 32]
@@ -238,7 +243,7 @@
         this._lastInference = -Infinity;
         this._lastVideoTime = -1;
         this._stalled = false;
-        this._emitStatus('ready', '카메라가 준비됐어요. 어깨와 두 손이 화면 안에 보이도록 서 주세요.');
+        this._emitStatus('ready', '카메라가 준비됐어요. 얼굴은 포함하지 않아도 돼요. 어깨부터 발끝까지 화면 안에 들어오도록 서 주세요.');
         if (!current()) return false;
         this._raf = requestAnimationFrame(timestamp => this._tick(timestamp, generation));
         return true;
@@ -289,8 +294,8 @@
           this._draw(landmarks);
           this._emitStatus(landmarks.length ? 'tracking' : 'missing',
             landmarks.length
-              ? '움직임을 보고 있어요. 두 손과 어깨가 화면 안에 보이도록 움직여 주세요.'
-              : '몸을 찾고 있어요. 어깨와 두 손이 잘 보이도록 한 걸음 물러나 주세요.');
+              ? '온몸의 움직임을 보고 있어요. 어깨부터 발끝까지 화면 안에서 자유롭게 움직여 주세요.'
+              : '몸 전체를 찾고 있어요. 얼굴은 필요 없어요. 어깨·골반·발목이 보이도록 한 걸음 물러나 주세요.');
           // Consumer may call stop() (e.g. after its ten-second recording).
           if (generation === this._generation) this.onFrame({ landmarks, timestamp });
         } catch (_) {
@@ -322,22 +327,26 @@
         raw[index].x >= 0 && raw[index].x <= 1 &&
         raw[index].y >= 0 && raw[index].y <= 1 &&
         (raw[index].visibility ?? 0) >= MIN_VISIBILITY;
-      // Need a credible upper body and one visible wrist. Never manufacture a
-      // continuing trajectory from a lost / occluded joint.
-      if (!raw || raw.length < 33 || !visible(11) || !visible(12) ||
-          !(visible(15) || visible(16))) {
+      // A dance recording needs the torso and both legs in frame. Hands may
+      // cross or briefly hide during a dance; they do not gate footwork.
+      // Facial landmarks are deliberately not accessed, even for validation.
+      if (!raw || raw.length < 33 ||
+          ![11, 12, 23, 24, 27, 28].every(visible)) {
         this._smoothed = null;
         return [];
       }
       const previous = timestamp - this._lastPoseTime < 300 ? this._smoothed : null;
-      const smoothed = raw.map((landmark, index) => {
+      const smoothed = Array.from({ length: 33 }, (_, index) => {
+        if (index < 11) return null;
+        const landmark = raw[index] || {};
         const finite = Number.isFinite(landmark.x) && Number.isFinite(landmark.y);
         const x = finite ? clamp(1 - landmark.x) : 0.5;
         const y = finite ? clamp(landmark.y) : 0.5;
         const z = Number.isFinite(landmark.z) ? landmark.z : 0;
         const inFrame = finite && landmark.x >= 0 && landmark.x <= 1 &&
           landmark.y >= 0 && landmark.y <= 1;
-        const visibility = inFrame ? clamp(landmark.visibility ?? 0) : 0;
+        const visibility = inFrame && Number.isFinite(landmark.visibility)
+          ? clamp(landmark.visibility) : 0;
         const last = previous?.[index];
         // Modest smoothing suppresses jitter without hiding sharp gestures.
         const alpha = last && last.visibility >= MIN_VISIBILITY &&
@@ -351,7 +360,7 @@
       });
       this._lastPoseTime = timestamp;
       this._smoothed = smoothed;
-      return smoothed.map(point => ({ ...point }));
+      return smoothed.map(point => point ? { ...point } : null);
     }
 
     _draw(landmarks) {

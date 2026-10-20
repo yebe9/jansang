@@ -25,6 +25,108 @@ function pointer(points, durationMs = 3000) {
 function webcam(poseFrames, durationMs = 3000) {
   return analyze({ source: 'webcam', poseFrames, durationMs, captureAspect: 1 });
 }
+function fullBodySeries(change = () => ({}), count = 61, step = 50) {
+  const body = {
+    leftShoulder: [0.4, 0.2], rightShoulder: [0.6, 0.2],
+    leftElbow: [0.3, 0.35], rightElbow: [0.7, 0.35],
+    leftWrist: [0.25, 0.5], rightWrist: [0.75, 0.5],
+    leftPinky: [0.24, 0.53], rightPinky: [0.76, 0.53],
+    leftIndex: [0.25, 0.54], rightIndex: [0.75, 0.54],
+    leftThumb: [0.26, 0.52], rightThumb: [0.74, 0.52],
+    leftHip: [0.43, 0.5], rightHip: [0.57, 0.5],
+    leftKnee: [0.43, 0.7], rightKnee: [0.57, 0.7],
+    leftAnkle: [0.43, 0.9], rightAnkle: [0.57, 0.9],
+    leftHeel: [0.43, 0.92], rightHeel: [0.57, 0.92],
+    leftFootIndex: [0.4, 0.95], rightFootIndex: [0.6, 0.95]
+  };
+  return Array.from({ length: count }, (_, i) => ({
+    t: i * step, segment: 0, joints: { ...body, ...change(i) }
+  }));
+}
+
+test('footwork changes the impression when the upper body stays still', () => {
+  const still = webcam(fullBodySeries());
+  const steps = webcam(fullBodySeries((i) => ({
+    leftAnkle: [0.43 + 0.14 * Math.sin(i * 0.8), 0.86],
+    rightAnkle: [0.57 - 0.14 * Math.sin(i * 0.8), 0.86]
+  })));
+  assert.equal(still.sufficient, true);
+  assert.equal(still.payload.metrics.fullBodyRatio, 1);
+  assert.equal(still.payload.metrics.coverage, 0, 'standing height is not motion coverage');
+  assert.equal(steps.payload.metrics.upperBodySpeed, 0);
+  assert.ok(steps.payload.metrics.lowerBodySpeed > 0.8);
+  assert.equal(steps.payload.metrics.meanSpeed, steps.payload.metrics.lowerBodySpeed);
+  assert.ok(steps.payload.metrics.pathLength > 2);
+  assert.ok(steps.payload.metrics.stillnessRatio < 0.1);
+  assert.notEqual(steps.local.impression, still.local.impression);
+  assert.ok(steps.local.observations.some((item) => /하체/.test(item)));
+  assert.equal(steps.local.qualities.length, 3);
+  assert.ok(!/[0-9%]|방향 전환율|평균 속도|정지 비율/.test(steps.local.description));
+});
+
+test('knees and elbows remain measurable when wrists and ankles are stationary', () => {
+  const knee = webcam(fullBodySeries((i) => ({
+    leftKnee: [0.43 + 0.1 * Math.sin(i * 0.5), 0.7],
+    rightKnee: [0.57 - 0.1 * Math.sin(i * 0.5), 0.7]
+  })));
+  const elbow = webcam(fullBodySeries((i) => ({
+    leftElbow: [0.3, 0.35 + 0.1 * Math.sin(i * 0.5)],
+    rightElbow: [0.7, 0.35 - 0.1 * Math.sin(i * 0.5)]
+  })));
+  assert.ok(knee.payload.metrics.lowerBodySpeed > 0.4);
+  assert.equal(knee.payload.metrics.upperBodySpeed, 0);
+  assert.ok(elbow.payload.metrics.upperBodySpeed > 0.4);
+  assert.equal(elbow.payload.metrics.lowerBodySpeed, 0);
+});
+
+test('22 non-face body joints survive sampling; faces and inferred joints never enter the payload', () => {
+  const frames = fullBodySeries((i) => ({
+    nose: [0.5, 0.1], leftEye: [0.48, 0.08],
+    leftAnkle: [0.43 + 0.05 * Math.sin(i), 0.9]
+  }), 151, 66);
+  delete frames[0].joints.leftHeel;
+  const report = webcam(frames, 10000);
+  assert.equal(report.payload.samples[0].joints.leftHeel, undefined);
+  assert.equal(Object.keys(report.payload.samples.at(-1).joints).length, 22);
+  assert.ok(report.payload.samples.every((sample) => !('nose' in sample.joints) && !('leftEye' in sample.joints)));
+  assert.ok(Buffer.byteLength(JSON.stringify(report.payload), 'utf8') < 100 * 1024);
+});
+
+test('full-body tracking gaps do not create foot speed, travel area, or turns', () => {
+  const frames = fullBodySeries(() => ({}), 21);
+  const relocated = fullBodySeries(() => ({
+    leftAnkle: [0.1, 0.1], rightAnkle: [0.9, 0.1]
+  }), 21).map((frame) => ({ ...frame, t: frame.t + 1050, segment: 1 }));
+  const result = webcam([...frames, ...relocated], 2050);
+  assert.equal(result.payload.metrics.meanSpeed, 0);
+  assert.equal(result.payload.metrics.lowerBodySpeed, 0);
+  assert.equal(result.payload.metrics.coverage, 0);
+  assert.equal(result.payload.metrics.directionChangeRate, 0);
+  assert.equal(result.payload.metrics.trackedDurationMs, 2000);
+});
+
+test('missing lower-body joints are not invented and reduce full-body coverage', () => {
+  const frames = fullBodySeries().map((frame, i) => {
+    const { leftAnkle, rightAnkle, ...partial } = frame.joints;
+    return i < 30 ? frame : { ...frame, joints: partial };
+  });
+  const report = webcam(frames);
+  assert.equal(report.payload.metrics.fullBodyRatio, 0.4918);
+  assert.equal(report.payload.samples.at(-1).joints.leftAnkle, undefined);
+  assert.equal(report.payload.metrics.meanSpeed, 0);
+  assert.ok(report.local.observations.some((item) => /일부만/.test(item)));
+});
+
+test('local impressions use expressive adjectives while synthetic examples stay identified', () => {
+  const result = analyze({
+    source: 'example', durationMs: 3000,
+    points: pointSeries((i) => ({ x: 0.5 + 0.3 * Math.sin(i * 0.1), y: 0.5 + 0.3 * Math.cos(i * 0.1) }))
+  });
+  assert.match(result.local.description, /합성 예시/);
+  assert.ok(['유연한', '빠른', '차분한', '경쾌한', '날카로운', '머뭇거리는', '초조한'].includes(result.local.impression));
+  assert.equal(result.local.qualities.length, 3);
+  assert.match(result.local.caveat, /간단한 규칙/);
+});
 
 test('distinguishes stationary wrists from energetic motion using measured features', () => {
   const still = webcam(poseSeries(() => [0.3, 0.5]));

@@ -43,7 +43,7 @@ function createApp({ fetchResponse, cameraStart } = {}) {
       this.hidden = /\bhidden(?:\s|=|$)/.test(attributes);
       this.checked = /\bchecked(?:\s|=|$)/.test(attributes);
       this.disabled = /\bdisabled(?:\s|=|$)/.test(attributes);
-      this.open = false;
+      this.open = /\bopen(?:\s|=|$)/.test(attributes);
       this.value = attributes.match(/\bvalue="([^"]*)"/)?.[1] || '';
       this.textContent = '';
       this.firstChild = { textContent: '' };
@@ -178,8 +178,42 @@ function landmarks(left = 0.25, right = 0.75) {
   const points = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, visibility: 0 }));
   for (const [index, x, y] of [
     [11, 0.4, 0.3], [12, 0.6, 0.3], [13, 0.3, 0.4], [14, 0.7, 0.4],
-    [15, left, 0.5], [16, right, 0.5], [23, 0.45, 0.7], [24, 0.55, 0.7],
+    [15, left, 0.5], [16, right, 0.5],
+    [17, left - 0.02, 0.52], [18, right + 0.02, 0.52],
+    [19, left, 0.53], [20, right, 0.53],
+    [21, left + 0.02, 0.5], [22, right - 0.02, 0.5],
+    [23, 0.45, 0.6], [24, 0.55, 0.6],
+    [25, 0.43, 0.73], [26, 0.57, 0.73],
+    [27, 0.41, 0.88], [28, 0.59, 0.88],
+    [29, 0.41, 0.90], [30, 0.59, 0.90],
+    [31, 0.37, 0.92], [32, 0.63, 0.92],
   ]) points[index] = { x, y, z: 0, visibility: 0.9 };
+  return points;
+}
+
+const bodyJointNames = [
+  'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow',
+  'leftWrist', 'rightWrist', 'leftPinky', 'rightPinky',
+  'leftIndex', 'rightIndex', 'leftThumb', 'rightThumb',
+  'leftHip', 'rightHip', 'leftKnee', 'rightKnee',
+  'leftAnkle', 'rightAnkle', 'leftHeel', 'rightHeel',
+  'leftFootIndex', 'rightFootIndex',
+].sort();
+
+function footwork(index, { hideHands = false, showFace = false } = {}) {
+  const points = landmarks();
+  for (const joint of [27, 28, 29, 30, 31, 32]) {
+    points[joint].x += (joint % 2 ? 1 : -1) * index * 0.01;
+    points[joint].y -= Math.sin(index / 3) * 0.03;
+  }
+  if (hideHands) {
+    for (let joint = 15; joint <= 22; joint++) points[joint].visibility = 0;
+  }
+  if (showFace) {
+    for (let joint = 0; joint <= 10; joint++) {
+      points[joint] = { x: 0.45 + joint * 0.01, y: 0.1, z: 0, visibility: 0.99 };
+    }
+  }
   return points;
 }
 
@@ -219,7 +253,11 @@ test('webcam recording pauses without joining movements across the gap and finis
   assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
   assert.equal(report.sufficient, true);
   assert.ok(report.payload.metrics.pathLength < 0.15, 'Jump during pause is not counted in traveled distance');
-  assert.equal(app.get('analysis-badge').textContent, '기본 수치 분석');
+  assert.equal(app.get('analysis-badge').textContent, '기본 인상 · 규칙 기반');
+  assert.deepEqual(app.get('analysis-qualities').children.map(tag => tag.textContent), report.local.qualities);
+  assert.equal(app.get('analysis-evidence').tagName, 'DETAILS');
+  assert.equal(app.get('analysis-evidence').hidden, false);
+  assert.equal(app.get('analysis-evidence').open, false, 'Movement evidence starts collapsed');
   assert.equal(app.calls.length, 0);
   assert.equal(app.get('analyze-button').disabled, false);
 });
@@ -236,6 +274,71 @@ test('tracking loss also opens a new recording segment, and finishing stops came
   assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
   assert.equal(camera.stopped, true);
   assert.ok(report.payload.metrics.pathLength < 0.15);
+});
+
+test('footwork with stationary arms records five traces and sends all 22 body joints without the visible face', async () => {
+  const app = createApp({ fetchResponse: async () => ok(aiResult) });
+  app.get('ai-consent').checked = true;
+  const camera = await app.startWebcam();
+  for (let i = 0; i < 21; i++) camera.emit(1000 + i * 65, footwork(i, { showFace: true }));
+  await app.click('finish');
+  await flush();
+
+  const { input, report } = app.reports.at(-1);
+  assert.equal(input.poseFrames.length, 21);
+  assert.equal(input.points.length, 105, 'Both hands, both feet and the body center leave a trace');
+  assert.equal(new Set(input.points.map(point => point.stroke)).size, 5);
+  assert.deepEqual(input.poseFrames[0].joints.leftWrist, input.poseFrames.at(-1).joints.leftWrist);
+  assert.notDeepEqual(input.poseFrames[0].joints.leftAnkle, input.poseFrames.at(-1).joints.leftAnkle);
+  assert.equal(report.sufficient, true);
+  assert.equal(report.payload.metrics.upperBodySpeed, 0);
+  assert.ok(report.payload.metrics.lowerBodySpeed > 0.05, 'Stationary arms do not conceal moving feet');
+  assert.ok(report.payload.metrics.meanSpeed > 0.05);
+  assert.equal(report.payload.metrics.fullBodyRatio, 1);
+  assert.equal(app.calls.length, 1);
+  for (const sample of [...input.poseFrames, ...app.calls[0].payload.samples]) {
+    assert.deepEqual(Object.keys(sample.joints).sort(), bodyJointNames, 'Only the 22 body joints are recorded and sent');
+  }
+});
+
+test('losing either ankle pauses capture until the whole body returns, without connecting the gap', async () => {
+  const app = createApp();
+  const camera = await app.startWebcam();
+  record(camera);
+  const recordedCount = app.get('point-count').textContent;
+  const lostLeftAnkle = landmarks(0.95, 0.05);
+  lostLeftAnkle[27].visibility = 0;
+  camera.emit(2400, lostLeftAnkle);
+  assert.equal(app.get('point-count').textContent, recordedCount);
+  assert.match(app.get('stage-status').textContent, /TRACKING/);
+  const lostRightAnkle = landmarks(0.05, 0.95);
+  lostRightAnkle[28].visibility = 0;
+  camera.emit(4000, lostRightAnkle);
+  assert.equal(app.get('point-count').textContent, recordedCount);
+  record(camera, 5000, 11, 0.7);
+  await app.click('finish');
+
+  const { input, report } = app.reports.at(-1);
+  assert.equal(input.durationMs, 2050, 'Time without the required ankles is excluded');
+  assert.deepEqual([...new Set(input.poseFrames.map(frame => frame.segment))], [1, 2]);
+  assert.ok(input.poseFrames.every(frame => frame.joints.leftAnkle && frame.joints.rightAnkle));
+  assert.ok(report.payload.metrics.pathLength < 0.15, 'Returning to view starts a separate trail segment');
+});
+
+test('occluded hands still allow full-body footwork to be recorded and analyzed', async () => {
+  const app = createApp();
+  const camera = await app.startWebcam();
+  for (let i = 0; i < 21; i++) camera.emit(1000 + i * 65, footwork(i, { hideHands: true }));
+  await app.click('finish');
+  const { input, report } = app.reports.at(-1);
+  assert.equal(input.durationMs, 1300);
+  assert.equal(input.points.length, 63, 'Feet and the body center keep their three visible traces');
+  assert.equal(new Set(input.points.map(point => point.stroke)).size, 3);
+  assert.ok(input.poseFrames.every(frame => !frame.joints.leftWrist && !frame.joints.rightWrist));
+  assert.equal(report.sufficient, true);
+  assert.equal(report.payload.metrics.fullBodyRatio, 1);
+  assert.ok(report.payload.metrics.lowerBodySpeed > report.payload.metrics.upperBodySpeed);
+  assert.equal(app.get('analyze-button').disabled, false);
 });
 
 test('choosing a camera replaces the stream and ignores old callbacks, then locks selection after recording begins', async () => {
@@ -353,7 +456,7 @@ test('synthetic example retains its source and never auto-sends even when automa
   app.get('ai-consent').checked = true;
   await app.click('example');
   assert.equal(app.reports.at(-1).report.payload.source, 'example');
-  assert.equal(app.get('analysis-badge').textContent, '합성 예시 · 수치 분석');
+  assert.equal(app.get('analysis-badge').textContent, '합성 예시 · 기본 인상');
   assert.equal(app.calls.length, 0);
 });
 
@@ -375,6 +478,9 @@ test('automatic AI sends only movement data and renders a successful interpretat
   assert.equal(options.credentials, 'omit');
   assert.equal(app.get('ai-word').textContent, aiResult.analysis.impression);
   assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+  assert.deepEqual(app.get('analysis-qualities').children.map(tag => tag.textContent), aiResult.analysis.qualities);
+  assert.equal(app.get('analysis-evidence').hidden, false);
+  assert.equal(app.get('analysis-evidence').open, false, 'AI interpretation leaves supporting evidence collapsed');
   assert.equal(app.get('analysis-observations').children[0].textContent, aiResult.analysis.observations[0]);
   assert.equal(app.get('analyze-button').disabled, false);
 });
@@ -391,6 +497,7 @@ test('a fresh take aborts an in-flight request and ignores its delayed success',
   assert.equal(app.calls.length, 1);
   const signal = app.calls[0].options.signal;
   assert.equal(signal.aborted, false);
+  app.get('analysis-evidence').open = true;
   await app.click('restart');
   await app.click('input-pointer');
   await app.click('start');
@@ -399,7 +506,10 @@ test('a fresh take aborts an in-flight request and ignores its delayed success',
   resolve(ok(aiResult));
   await flush();
   assert.equal(app.get('ai-word').textContent, '기록 전');
-  assert.equal(app.get('analysis-badge').textContent, '기본 수치 분석');
+  assert.equal(app.get('analysis-badge').textContent, '기본 인상 · 규칙 기반');
+  assert.equal(app.get('analysis-qualities').children.length, 0);
+  assert.equal(app.get('analysis-evidence').open, false);
+  assert.equal(app.get('analysis-evidence').hidden, true);
   assert.equal(app.timers.size, 0, 'Completed stale request clears its timeout');
 });
 
@@ -412,9 +522,9 @@ test('an AI error keeps measured local results and shows the server guidance', a
   record(camera);
   await app.click('finish');
   await flush();
-  assert.equal(app.get('analysis-badge').textContent, '기본 수치 분석');
+  assert.equal(app.get('analysis-badge').textContent, '기본 인상 · 규칙 기반');
   assert.equal(app.get('ai-word').textContent, app.reports.at(-1).report.local.impression);
   assert.match(app.get('analysis-status').textContent, /무료 사용량 한도/);
-  assert.match(app.get('analysis-status').textContent, /기본 수치 분석/);
+  assert.match(app.get('analysis-status').textContent, /규칙 기반 기본 인상/);
   assert.equal(app.get('analyze-button').disabled, false);
 });

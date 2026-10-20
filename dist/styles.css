@@ -24,7 +24,11 @@
 #camera-switch-note{display:block;margin-top:6px;font-size:9px}
 .analysis-status{font-size:10px;line-height:1.85;color:#e2b99c;margin:15px 0}
 .analysis-evidence{border-left:2px solid #8baf9a;padding:2px 0 2px 13px;margin:17px 0}
-.analysis-evidence h3{font-size:11px;font-weight:500;color:#c1d3c5;margin:0 0 9px}
+.analysis-evidence summary{font-size:11px;font-weight:500;color:#c1d3c5;cursor:pointer;line-height:1.8}
+.analysis-evidence[open] summary{margin-bottom:10px}
+.analysis-evidence summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.quality-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:13px}
+.quality-tags span{font-size:12px;border:1px solid #c59c7866;border-radius:20px;background:#483c32;color:#f0c9a6;padding:6px 10px}
 .analysis-evidence ul{margin:0;padding-left:15px;font-size:11px;color:#a9c1b1;line-height:1.85}
 .analysis-evidence li+li{margin-top:6px}
 #analysis-caveat{font-size:9px;color:#8ca898;line-height:1.8;margin:10px 0 0}
@@ -80,7 +84,7 @@ body[data-view=result] .stage-number{display:none}
 .comparison-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px}
 .comparison-heading h2{font-size:14px;letter-spacing:-.4px;margin:0;font-weight:500;color:#d5e1d8}
 .preview-badge{font-size:9px;border:1px solid #66837570;color:#abc1b3;border-radius:12px;padding:4px 7px;white-space:nowrap}
-.comparison-cards{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.comparison-cards{display:grid;grid-template-columns:1fr;gap:10px}
 .comparison-card{border:1px solid #6f9b7c50;border-radius:9px;background:#253b35;padding:16px 13px;min-width:0}
 .comparison-card.ai-card{background:#363330;border-color:#a58a6950}
 .card-label{font:7px var(--mono);letter-spacing:.4px;color:#98b6a1;margin:0 0 12px}
@@ -89,7 +93,7 @@ body[data-view=result] .stage-number{display:none}
 .ai-card h3{color:#d2b99b}
 #ai-example-badge{display:inline-block;margin-left:3px;font-size:8px;padding:1px 4px;border:1px solid #988268;border-radius:3px}
 .comparison-card strong{font-size:21px;font-weight:500;letter-spacing:-.6px;color:#d4e9c6;display:block;overflow-wrap:anywhere}
-.ai-card strong{color:#efc6a5}
+.ai-card strong{color:#efc6a5;font-size:30px;line-height:1.4}
 .comparison-card>p:last-child{font-size:11px;line-height:1.8;color:#abc3b1;margin:12px 0 0;overflow-wrap:anywhere;white-space:pre-wrap}
 .ai-card>p:last-child{color:#c5b29b}
 .demo-toggle{width:100%;display:flex;justify-content:space-between;align-items:center;border:1px solid #68847466;border-radius:6px;margin-top:12px;font-size:11px;color:#b4c8ba;padding:12px;text-align:left;background:#203137}
