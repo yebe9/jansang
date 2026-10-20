@@ -49,8 +49,9 @@ function fixture({ trackingMode = 'body' } = {}) {
     style: {}, setAttribute() {}, play: () => Promise.resolve(), pause() {},
     readyState: 4, currentTime: 0, videoWidth: 640, videoHeight: 480
   };
-  const arcs = [];
-  const paint = { clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
+  const arcs = [], strokes = [];
+  const paint = { clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {},
+    stroke() { strokes.push(this.strokeStyle); },
     arc(...args) { arcs.push(args); }, fill() {} };
   const overlay = { style: {}, width: 640, height: 480, getContext: () => paint };
   const frames = [], statuses = [], deviceReports = [];
@@ -62,8 +63,12 @@ function fixture({ trackingMode = 'body' } = {}) {
   let raw = Array.from({ length: trackingMode === 'hand' ? 21 : 33 },
     () => ({ x: 0.25, y: 0.4, z: 0.1, ...(trackingMode === 'hand' ? {} : { visibility: 0.9 }) }));
   let handedness = { categoryName: 'Right', score: 0.95 };
+  let hands;
   const detector = {
-    detectForVideo() { calls++; return { landmarks: raw ? [raw] : [], handedness: [[handedness]], close() {} }; },
+    detectForVideo() { calls++; return {
+      landmarks: hands ? hands.map(hand => hand.landmarks) : raw ? [raw] : [],
+      handedness: hands ? hands.map(hand => [hand.handedness]) : [[handedness]], close() {}
+    }; },
     close() { closed++; }
   };
   const createDetector = camera._createDetector;
@@ -76,10 +81,11 @@ function fixture({ trackingMode = 'body' } = {}) {
     entry[1](timestamp);
   }
   return {
-    camera, track, stream, video, frames, statuses, deviceReports, detector, context, scheduled, frame, createDetector, arcs,
+    camera, track, stream, video, frames, statuses, deviceReports, detector, context, scheduled, frame, createDetector, arcs, strokes,
     get closed() { return closed; }, get calls() { return calls; },
-    setRaw(value) { raw = value; },
-    setHandedness(value) { handedness = value; }
+    setRaw(value) { raw = value; hands = undefined; },
+    setHandedness(value) { handedness = value; },
+    setHands(value) { hands = value; }
   };
 }
 
@@ -529,10 +535,10 @@ test('hand mode uses the hand model and preserves GPU-to-CPU fallback', async ()
   assert.match(optionsSeen[0].baseOptions.modelAssetPath,
     /hand_landmarker\/hand_landmarker\/float16\/1\/hand_landmarker\.task$/);
   assert.equal(optionsSeen[0].runningMode, 'VIDEO');
-  assert.equal(optionsSeen[0].numHands, 1);
+  assert.equal(optionsSeen[0].numHands, 2);
   assert.equal(optionsSeen[0].numPoses, undefined);
   assert.equal(optionsSeen[0].outputSegmentationMasks, undefined);
-  assert.match(f.statuses.at(-1).message, /한 손/);
+  assert.match(f.statuses.at(-1).message, /양손/);
   f.camera.stop();
   assert.equal(f.closed, 1);
 });
@@ -557,7 +563,10 @@ test('hand mode returns 21 mirrored fresh joints without any torso or visibility
   const f = fixture({ trackingMode: 'hand' });
   await f.camera.start();
   f.frame(100);
-  const first = f.frames[0].landmarks;
+  assert.equal(f.frames[0].landmarks.length, 0, 'Hand coordinates use only the hands contract');
+  assert.equal(f.frames[0].hands.length, 1);
+  assert.ok(Number.isInteger(f.frames[0].hands[0].id) && f.frames[0].hands[0].id > 0);
+  const first = f.frames[0].hands[0].landmarks;
   assert.equal(first.length, 21);
   assert.equal(first[0].x, 0.75);
   assert.equal(first[8].x, 0.75);
@@ -567,7 +576,7 @@ test('hand mode returns 21 mirrored fresh joints without any torso or visibility
   first[8].x = 0;
   f.video.currentTime++;
   f.frame(200);
-  assert.equal(f.frames[1].landmarks[8].x, 0.75, 'Consumer mutation must not corrupt smoothing history');
+  assert.equal(f.frames[1].hands[0].landmarks[8].x, 0.75, 'Consumer mutation must not corrupt smoothing history');
   f.camera.stop();
   assert.equal(f.track.stopped, 1);
   assert.equal(f.closed, 1);
@@ -578,6 +587,7 @@ test('hand loss and invalid required joints emit missing frames and reset smooth
   const f = fixture({ trackingMode: 'hand' });
   await f.camera.start();
   f.frame(100);
+  const firstId = f.frames[0].hands[0].id;
   let timestamp = 100;
   for (const index of [0, 5, 8]) {
     for (const invalid of [null, { x: NaN, y: 0.5 }, { x: 0.5, y: -0.1 }]) {
@@ -586,20 +596,20 @@ test('hand loss and invalid required joints emit missing frames and reset smooth
       f.setRaw(raw);
       f.video.currentTime++;
       f.frame(timestamp += 100);
-      assert.equal(f.frames.at(-1).landmarks.length, 0);
-      assert.equal(f.camera._smoothed, null);
-      assert.equal(f.camera._handIdentity, null);
+      assert.equal(f.frames.at(-1).hands.length, 0);
+      assert.equal(f.camera._handTracks.length, 0);
       assert.match(f.statuses.at(-1).message, /손을 찾고/);
     }
   }
   f.setRaw(null);
   f.video.currentTime++;
   f.frame(timestamp += 100);
-  assert.equal(f.frames.at(-1).landmarks.length, 0);
+  assert.equal(f.frames.at(-1).hands.length, 0);
   f.setRaw(Array.from({ length: 21 }, () => ({ x: 0.1, y: 0.2, z: 0 })));
   f.video.currentTime++;
   f.frame(timestamp += 100);
-  assert.equal(f.frames.at(-1).landmarks[8].x, 0.9, 'Reappearing hand starts without old smoothing');
+  assert.equal(f.frames.at(-1).hands[0].landmarks[8].x, 0.9, 'Reappearing hand starts without old smoothing');
+  assert.notEqual(f.frames.at(-1).hands[0].id, firstId, 'A missing hand cannot bridge to its former trail');
   f.camera.stop();
 });
 
@@ -611,7 +621,7 @@ test('invalid optional hand joints are invisible while wrist and index remain us
   f.setRaw(raw);
   await f.camera.start();
   f.frame(100);
-  const points = f.frames[0].landmarks;
+  const points = f.frames[0].hands[0].landmarks;
   assert.equal(points.length, 21);
   assert.equal(points[4].visibility, 0);
   assert.equal(points[20].visibility, 0);
@@ -622,22 +632,24 @@ test('invalid optional hand joints are invisible while wrist and index remain us
   f.camera.stop();
 });
 
-test('confident hand replacement emits a gap instead of joining left and right trails', async () => {
+test('confident hand replacement gets a fresh ID instead of joining left and right trails', async () => {
   const f = fixture({ trackingMode: 'hand' });
   await f.camera.start();
   f.frame(100);
+  const firstId = f.frames[0].hands[0].id;
   f.setHandedness({ categoryName: 'Left', score: 0.99 });
   f.video.currentTime++;
   f.frame(200);
-  assert.equal(f.frames.at(-1).landmarks.length, 0);
-  assert.equal(f.camera._smoothed, null);
+  assert.equal(f.frames.at(-1).hands.length, 1);
+  const replacedId = f.frames.at(-1).hands[0].id;
+  assert.notEqual(replacedId, firstId);
   f.video.currentTime++;
   f.frame(300);
-  assert.equal(f.frames.at(-1).landmarks.length, 21, 'Resume with the replacement hand on the next frame');
+  assert.equal(f.frames.at(-1).hands[0].id, replacedId);
   f.setHandedness({ categoryName: 'Right', score: 0.55 });
   f.video.currentTime++;
   f.frame(400);
-  assert.equal(f.frames.at(-1).landmarks.length, 21, 'Uncertain handedness should not interrupt a gesture');
+  assert.equal(f.frames.at(-1).hands[0].id, replacedId, 'Uncertain handedness should not interrupt a gesture');
   f.camera.stop();
 });
 
@@ -646,14 +658,15 @@ test('large hand position discontinuity breaks the stroke even without handednes
   f.setHandedness(undefined);
   await f.camera.start();
   f.frame(100);
+  const firstId = f.frames[0].hands[0].id;
   f.setRaw(Array.from({ length: 21 }, () => ({ x: 0.9, y: 0.4, z: 0 })));
   f.video.currentTime++;
   f.frame(200);
-  assert.equal(f.frames.at(-1).landmarks.length, 0);
+  assert.notEqual(f.frames.at(-1).hands[0].id, firstId);
   f.video.currentTime++;
   f.frame(300);
-  assert.equal(f.frames.at(-1).landmarks.length, 21);
-  assert.ok(Math.abs(f.frames.at(-1).landmarks[0].x - 0.1) < 1e-10);
+  assert.equal(f.frames.at(-1).hands[0].landmarks.length, 21);
+  assert.ok(Math.abs(f.frames.at(-1).hands[0].landmarks[0].x - 0.1) < 1e-10);
   f.camera.stop();
 });
 
@@ -677,12 +690,209 @@ test('hand mode frozen video and consumer stop cannot leave stale callbacks', as
   await f.camera.start();
   f.frame(100);
   f.frame(900);
-  assert.equal(f.frames.at(-1).landmarks.length, 0);
-  assert.equal(f.camera._smoothed, null);
-  assert.equal(f.camera._handIdentity, null);
+  assert.equal(f.frames.at(-1).hands.length, 0);
+  assert.equal(f.camera._handTracks.length, 0);
   f.camera.onFrame = () => f.camera.stop();
   f.video.currentTime++;
   f.frame(1000);
   assert.equal(f.scheduled.size, 0);
   assert.equal(f.track.stopped, 1);
+});
+
+function handAt(x, y = 0.4, categoryName) {
+  return {
+    landmarks: Array.from({ length: 21 }, () => ({ x, y, z: 0 })),
+    handedness: categoryName ? { categoryName, score: 0.98 } : undefined
+  };
+}
+
+test('both hands keep IDs and independent smoothing when detector array order reverses', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.2, 0.4, 'Left'), handAt(0.8, 0.6, 'Right')]);
+  await f.camera.start();
+  f.frame(100);
+  const first = f.frames.at(-1).hands;
+  const leftId = first.find(hand => hand.landmarks[0].x > 0.5).id;
+  const rightId = first.find(hand => hand.landmarks[0].x < 0.5).id;
+  assert.notEqual(leftId, rightId);
+  assert.equal(f.frames.at(-1).landmarks.length, 0);
+  assert.equal(f.arcs.length, 42, 'Draw the two 21-joint skeletons');
+  assert.equal(new Set(f.strokes).size, 2, 'Each hand uses a different skeleton color');
+  assert.match(f.statuses.at(-1).message, /양손/);
+  f.setHands([handAt(0.78, 0.5, 'Right'), handAt(0.22, 0.3, 'Left')]);
+  f.video.currentTime++;
+  f.frame(200);
+  const current = f.frames.at(-1).hands;
+  const left = current.find(hand => hand.id === leftId);
+  const right = current.find(hand => hand.id === rightId);
+  assert.ok(left && right, 'Reordering must not replace identities');
+  assert.ok(Math.abs(left.landmarks[8].x - 0.787) < 1e-10);
+  assert.ok(Math.abs(right.landmarks[8].x - 0.213) < 1e-10);
+  assert.ok(Math.abs(left.landmarks[8].y - 0.335) < 1e-10);
+  assert.ok(Math.abs(right.landmarks[8].y - 0.535) < 1e-10);
+  current[0].id = 999;
+  current[0].landmarks[8].x = 999;
+  f.video.currentTime++;
+  f.frame(300);
+  assert.ok(f.frames.at(-1).hands.every(hand => hand.id !== 999 && hand.landmarks[8].x <= 1),
+    'Consumer mutation must not affect either stored track');
+  f.camera.stop();
+});
+
+test('spatial matching preserves separated hand IDs without handedness metadata', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.2), handAt(0.8)]);
+  await f.camera.start();
+  f.frame(100);
+  const first = f.frames.at(-1).hands.map(hand => ({ id: hand.id, x: hand.landmarks[0].x }));
+  f.setHands([handAt(0.78), handAt(0.22)]);
+  f.video.currentTime++;
+  f.frame(200);
+  for (const hand of f.frames.at(-1).hands) {
+    const prior = first.find(item => item.id === hand.id);
+    assert.ok(prior);
+    assert.ok(Math.abs(prior.x - hand.landmarks[0].x) < 0.02);
+  }
+  f.camera.stop();
+});
+
+test('one missing hand does not break the other and returning hands get a new ID and color', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.2, 0.4, 'Left'), handAt(0.8, 0.4, 'Right')]);
+  await f.camera.start();
+  f.frame(100);
+  const first = f.frames.at(-1).hands;
+  const keptId = first.find(hand => hand.landmarks[0].x > 0.5).id;
+  const lostId = first.find(hand => hand.landmarks[0].x < 0.5).id;
+  const keptColor = f.camera._handTracks.find(hand => hand.id === keptId).color;
+  f.setHands([handAt(0.22, 0.4, 'Left')]);
+  f.video.currentTime++;
+  f.frame(200);
+  assert.equal(f.frames.at(-1).hands.length, 1);
+  assert.equal(f.frames.at(-1).hands[0].id, keptId);
+  assert.match(f.statuses.at(-1).message, /한 손/);
+  f.setHands([handAt(0.78, 0.4, 'Right'), handAt(0.24, 0.4, 'Left')]);
+  f.video.currentTime++;
+  f.frame(300);
+  const current = f.frames.at(-1).hands;
+  assert.ok(current.some(hand => hand.id === keptId));
+  assert.ok(current.every(hand => hand.id !== lostId));
+  assert.ok(current.find(hand => hand.id !== keptId).id > Math.max(keptId, lostId));
+  assert.equal(f.camera._handTracks.find(hand => hand.id === keptId).color, keptColor);
+  assert.equal(new Set(f.camera._handTracks.map(hand => hand.color)).size, 2);
+  f.camera.stop();
+});
+
+test('a malformed hand only removes its own track and at most two hands are processed', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.2, 0.4, 'Left'), handAt(0.8, 0.4, 'Right')]);
+  await f.camera.start();
+  f.frame(100);
+  const keptId = f.frames.at(-1).hands.find(hand => hand.landmarks[0].x > 0.5).id;
+  const malformed = handAt(0.8, 0.4, 'Right');
+  malformed.landmarks[8] = { x: Infinity, y: 0.4 };
+  f.setHands([malformed, handAt(0.22, 0.4, 'Left'), handAt(0.5)]);
+  f.video.currentTime++;
+  f.frame(200);
+  assert.equal(f.frames.at(-1).hands.length, 1);
+  assert.equal(f.frames.at(-1).hands[0].id, keptId);
+  assert.equal(f.statuses.at(-1).kind, 'tracking');
+  f.camera.stop();
+});
+
+test('both hands lost or an inference gap prevent reusing earlier trail IDs', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.2, 0.4, 'Left'), handAt(0.8, 0.4, 'Right')]);
+  await f.camera.start();
+  f.frame(100);
+  const firstIds = f.frames.at(-1).hands.map(hand => hand.id);
+  f.setHands([]);
+  f.video.currentTime++;
+  f.frame(200);
+  assert.equal(f.frames.at(-1).hands.length, 0);
+  assert.equal(f.camera._handTracks.length, 0);
+  f.setHands([handAt(0.2, 0.4, 'Left'), handAt(0.8, 0.4, 'Right')]);
+  f.video.currentTime++;
+  f.frame(300);
+  const returnedIds = f.frames.at(-1).hands.map(hand => hand.id);
+  assert.ok(returnedIds.every(id => !firstIds.includes(id)));
+  f.video.currentTime++;
+  f.frame(700);
+  assert.ok(f.frames.at(-1).hands.every(hand => !returnedIds.includes(hand.id)),
+    'A long inference gap must not interpolate missing movement');
+  f.camera.stop();
+});
+
+test('overlapping unlabeled hands reset ambiguous IDs instead of swapping their trails', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.4), handAt(0.6)]);
+  await f.camera.start();
+  f.frame(100);
+  const ids = f.frames.at(-1).hands.map(hand => hand.id);
+  f.setHands([handAt(0.49), handAt(0.51)]);
+  f.video.currentTime++;
+  f.frame(200);
+  const current = f.frames.at(-1).hands;
+  assert.equal(current.length, 2);
+  assert.ok(current.every(hand => !ids.includes(hand.id)));
+  assert.ok(current.every(hand => Math.abs(hand.landmarks[0].x - 0.5) < 0.011),
+    'Ambiguous tracks must not inherit either hand smoothing history');
+  f.camera.stop();
+});
+
+test('one ambiguous unlabeled hand between two former hands receives a fresh ID', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.4), handAt(0.6)]);
+  await f.camera.start();
+  f.frame(100);
+  const ids = f.frames.at(-1).hands.map(hand => hand.id);
+  f.setHands([handAt(0.5)]);
+  f.video.currentTime++;
+  f.frame(200);
+  assert.equal(f.frames.at(-1).hands.length, 1);
+  assert.ok(!ids.includes(f.frames.at(-1).hands[0].id));
+  f.camera.stop();
+});
+
+test('confident handedness can preserve two crossing hands independently of their spatial order', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.4, 0.4, 'Left'), handAt(0.6, 0.4, 'Right')]);
+  await f.camera.start();
+  f.frame(100);
+  const leftId = f.frames.at(-1).hands.find(hand => hand.landmarks[0].x > 0.5).id;
+  const rightId = f.frames.at(-1).hands.find(hand => hand.landmarks[0].x < 0.5).id;
+  f.setHands([handAt(0.4, 0.4, 'Right'), handAt(0.6, 0.4, 'Left')]);
+  f.video.currentTime++;
+  f.frame(200);
+  const left = f.frames.at(-1).hands.find(hand => hand.id === leftId);
+  const right = f.frames.at(-1).hands.find(hand => hand.id === rightId);
+  assert.ok(left.landmarks[0].x < 0.5);
+  assert.ok(right.landmarks[0].x > 0.5);
+  f.camera.stop();
+});
+
+test('a frozen hand stream clears both identities and a fresh start resets IDs and resources', async () => {
+  const f = fixture({ trackingMode: 'hand' });
+  f.setHands([handAt(0.2), handAt(0.8)]);
+  await f.camera.start();
+  f.frame(100);
+  const firstIds = f.frames.at(-1).hands.map(hand => hand.id);
+  f.frame(900);
+  assert.equal(f.frames.at(-1).hands.length, 0);
+  assert.equal(f.camera._handTracks.length, 0);
+  f.video.currentTime++;
+  f.frame(1000);
+  assert.ok(f.frames.at(-1).hands.every(hand => !firstIds.includes(hand.id)));
+  f.camera.stop();
+  assert.equal(f.camera._handTracks.length, 0);
+  assert.equal(f.camera._nextHandId, 1);
+  assert.equal(f.track.stopped, 1);
+  assert.equal(f.closed, 1);
+  assert.equal(f.scheduled.size, 0);
+  await f.camera.start();
+  f.frame(1100);
+  assert.deepEqual(Array.from(f.frames.at(-1).hands, hand => hand.id), [1, 2]);
+  f.camera.stop();
+  assert.equal(f.track.stopped, 2);
+  assert.equal(f.closed, 2);
 });

@@ -64,8 +64,11 @@ tempoVariation은 속도의 표준편차/평균, directionChangeRate는 초당 �
 trackedDurationMs는 유효하게 추적한 시간, validFrameRatio는 유효 관측 비율, fullBodyRatio는 양어깨·골반·무릎·발목을 모두 관측한 프레임 비율이다.
 fullBodyRatio가 낮으면 보이는 부분만으로 읽었다고 짧게 밝힌다. 모든 지표는 휴리스틱이며 정확한 신체량이 아니다.
 source가 webcam 또는 hand인 sample의 segment가 바뀌면 일시정지 또는 추적 손실 후 새 기록 구간이다. t는 정지 시간을 제외하므로 다른 segment 사이를 연결하거나 그 사이의 속도·방향을 추정하지 않는다.
-source가 hand이면 웹캠으로 한 손의 21개 관절만 관측한 기록이다. 손목과 다섯 손가락 이외의 신체는 제공되지 않으므로 팔, 다리, 머리, 몸통, 전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다.
-handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목의 궤적을 우선 감상한다. hand의 meanSpeed, peakSpeed, stillnessRatio, coverage, spread, tempoVariation, directionChangeRate, pathLength, trackedDurationMs는 오직 이 선택한 자취에서 계산한 값이다.
+source가 hand이면 웹캠으로 한 손 또는 두 손을 관측한 기록이다. 각 sample의 hands 배열에는 실제로 보인 손만 최대 두 개 들어 있고, 손마다 id와 최대 21개 joints가 있다. 손목과 다섯 손가락 이외의 신체는 제공되지 않으므로 팔, 다리, 머리, 몸통, 전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다.
+손 id는 이어지는 추적 구간을 구별하는 번호이며 해부학적 왼손·오른손을 뜻하지 않는다. 좌우 손이라고 단정하지 말고 한 손, 두 손, 손 1의 자취처럼 표현한다. id가 달라지거나 어느 프레임에서 사라진 손의 자취를 다른 손 또는 재등장한 손에 연결하지 않는다. 같은 id여도 segment가 바뀌거나 큰 시간 공백이 있으면 연결하지 않는다.
+두 손의 나란한 흐름, 반대 방향 움직임, 가까워짐·멀어짐, 리듬의 대비는 두 손이 동시에 보인 연속 구간에서만 근거를 찾는다. 한 손씩 번갈아 관측된 기록으로 두 손의 협응을 상상하지 않는다.
+handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목의 궤적을 우선 감상한다. hand의 meanSpeed, peakSpeed, stillnessRatio, coverage, spread, tempoVariation, directionChangeRate, pathLength, trackedDurationMs는 오직 각 손의 선택한 자취에서 계산한 값이다.
+hand의 meanSpeed, pathLength, directionChangeRate는 같은 연속 시간 구간에서 관측된 각 손의 선택 지점 이동을 평균한 값이다. peakSpeed는 가장 빠른 손의 순간 속도이며, trackedDurationMs는 손이 둘이어도 같은 시간 구간을 두 번 세지 않는다. 한 손이 가만히 있고 다른 손이 움직이는 경우 평균 지표만으로 두 손이 모두 정지했다고 판단하지 않는다.
 hand의 coverage와 spread는 선택한 자취가 연속해서 움직인 범위이며 손 자체의 크기나 손가락 간 벌어짐이 아니다. 다른 손가락의 움직임은 실제 관절 좌표에서 관측되는 경우에만 보조 근거로 쓴다. 손목이 가만히 있어도 검지 끝은 움직일 수 있으며 그 반대도 가능하다.
 hand의 validFrameRatio는 선택한 지점을 포함하여 손 관절이 인식된 프레임 비율이다. 전신 관절이나 fullBodyRatio가 없다는 이유로 손 기록을 불충분하다고 판단하지 않는다. "검지 끝이 완만하게 이어져 유연한 자취를 남깁니다."처럼 실제 선택한 손의 자취를 설명한다.
 source가 pointer이면 손으로 그린 선만 관측한 것이므로 신체 자세나 춤을 보았다고 쓰지 않는다.
@@ -92,7 +95,8 @@ export function validateMotion(value) {
   if (!isRecord(value) || !onlyKeys(value, ['source', 'handTarget', 'durationMs', 'sampleCount', 'metrics', 'samples'])) invalid();
   if (!['webcam', 'hand', 'pointer', 'example'].includes(value.source) || !numberIn(value.durationMs, 1, 10000)) invalid();
   if (value.source === 'hand' ? !['indexTip', 'wrist'].includes(value.handTarget) : 'handTarget' in value) invalid();
-  if (!Array.isArray(value.samples) || value.samples.length < 2 || value.samples.length > MAX_FRAMES) invalid();
+  if (!Array.isArray(value.samples) || value.samples.length < 2 ||
+      value.samples.length > (value.source === 'hand' ? 60 : MAX_FRAMES)) invalid();
   if (!Number.isInteger(value.sampleCount) || value.sampleCount < value.samples.length || value.sampleCount > 100000) invalid();
   if (!isRecord(value.metrics) || Object.keys(value.metrics).length > METRICS.size) invalid();
   const metrics = {};
@@ -104,21 +108,41 @@ export function validateMotion(value) {
     metrics[name] = metric;
   }
   let previousTime = -1;
+  // Accept already-open single-hand clients while normalizing the provider
+  // contract to explicit tracks. Do not mix both formats within one recording.
+  const handFormat = value.source === 'hand' && isRecord(value.samples[0]) && Object.hasOwn(value.samples[0], 'hands')
+    ? 'hands' : 'joints';
+  const validateJoints = (value, allowed, requiredTarget) => {
+    if (!isRecord(value)) invalid();
+    const entries = Object.entries(value);
+    if (entries.length < 2 || entries.length > allowed.size || (requiredTarget && !Object.hasOwn(value, requiredTarget))) invalid();
+    const joints = {};
+    for (const [name, xy] of entries) {
+      if (!allowed.has(name) || !Array.isArray(xy) || xy.length !== 2 || !xy.every(v => numberIn(v, 0, 1))) invalid();
+      joints[name] = [xy[0], xy[1]];
+    }
+    return joints;
+  };
   const samples = value.samples.map(sample => {
     if (!isRecord(sample) || !numberIn(sample.t, 0, value.durationMs) || sample.t < previousTime) invalid();
     previousTime = sample.t;
     if (value.source === 'webcam' || value.source === 'hand') {
-      const allowedJoints = value.source === 'hand' ? HAND_JOINTS : JOINTS;
-      if (!onlyKeys(sample, ['t', 'joints', 'segment']) || !isRecord(sample.joints)) invalid();
       if (sample.segment !== undefined && (!Number.isInteger(sample.segment) || !numberIn(sample.segment, 0, 10000))) invalid();
-      const jointEntries = Object.entries(sample.joints);
-      if (jointEntries.length < 2 || jointEntries.length > allowedJoints.size) invalid();
-      if (value.source === 'hand' && !Object.hasOwn(sample.joints, value.handTarget)) invalid();
-      const joints = {};
-      for (const [joint, xy] of jointEntries) {
-        if (!allowedJoints.has(joint) || !Array.isArray(xy) || xy.length !== 2 || !xy.every(v => numberIn(v, 0, 1))) invalid();
-        joints[joint] = [xy[0], xy[1]];
+      if (value.source === 'hand') {
+        if (!onlyKeys(sample, ['t', handFormat, 'segment'])) invalid();
+        const observations = handFormat === 'hands' ? sample.hands : [{ id: 1, joints: sample.joints }];
+        if (!Array.isArray(observations) || observations.length < 1 || observations.length > 2) invalid();
+        const ids = new Set();
+        const hands = observations.map(hand => {
+          if (!isRecord(hand) || !onlyKeys(hand, ['id', 'joints']) ||
+              !Number.isSafeInteger(hand.id) || hand.id < 1 || ids.has(hand.id)) invalid();
+          ids.add(hand.id);
+          return { id: hand.id, joints: validateJoints(hand.joints, HAND_JOINTS, value.handTarget) };
+        });
+        return sample.segment === undefined ? { t: sample.t, hands } : { t: sample.t, hands, segment: sample.segment };
       }
+      if (!onlyKeys(sample, ['t', 'joints', 'segment'])) invalid();
+      const joints = validateJoints(sample.joints, JOINTS);
       return sample.segment === undefined ? { t: sample.t, joints } : { t: sample.t, joints, segment: sample.segment };
     }
     if (!onlyKeys(sample, ['t', 'x', 'y', 'stroke']) ||

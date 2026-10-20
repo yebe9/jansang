@@ -142,14 +142,14 @@ test('hand traces reach Gemini with the selected target and no unsupported whole
     const report = analyze({ source: 'hand', handTarget, poseFrames, points, durationMs: 10000 });
     assert.equal(report.sufficient, true);
     assert.equal(report.payload.samples.length, 60);
-    assert.equal(Object.keys(report.payload.samples[0].joints).length, 21);
+    assert.equal(Object.keys(report.payload.samples[0].hands[0].joints).length, 21);
     assert.ok(Buffer.byteLength(JSON.stringify(report.payload), 'utf8') < MAX_BODY_BYTES);
     assert.deepEqual(validateMotion(report.payload), report.payload);
     const response = await handleApi(request(report.payload), { env, fetchImpl: async (_url, init) => {
       const body = JSON.parse(init.body);
       assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), report.payload);
       const prompt = body.systemInstruction.parts[0].text;
-      assert.match(prompt, /source가 hand이면 웹캠으로 한 손의 21개 관절만/);
+      assert.match(prompt, /source가 hand이면 웹캠으로 한 손 또는 두 손을 관측/);
       assert.match(prompt, /전신 자세, 스텝이나 춤을 보았다고 쓰지 않는다/);
       assert.match(prompt, /handTarget이 indexTip이면 선택한 검지 끝, wrist이면 선택한 손목/);
       assert.match(prompt, /전신 관절이나 fullBodyRatio가 없다는 이유로 손 기록을 불충분하다고 판단하지 않는다/);
@@ -157,6 +157,117 @@ test('hand traces reach Gemini with the selected target and no unsupported whole
     } });
     assert.equal(response.status, 200);
   }
+});
+
+test('two complete observed hands fit the bounded request and reach Gemini as separate tracks', async () => {
+  const { handleApi, validateMotion, MAX_BODY_BYTES } = await handler;
+  const { analyze } = require('../dist/motion-analysis.js');
+  const names = [
+    'wrist', 'thumbCmc', 'thumbMcp', 'thumbIp', 'thumbTip',
+    'indexMcp', 'indexPip', 'indexDip', 'indexTip',
+    'middleMcp', 'middlePip', 'middleDip', 'middleTip',
+    'ringMcp', 'ringPip', 'ringDip', 'ringTip',
+    'pinkyMcp', 'pinkyPip', 'pinkyDip', 'pinkyTip'
+  ];
+  const poseFrames = Array.from({ length: 151 }, (_, i) => ({
+    t: i * 66.123, segment: 10000,
+    hands: [Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER].map((id, n) => ({
+      id, joints: Object.fromEntries(names.map((name, j) => [name, [
+        0.5 + (n ? -1 : 1) * 0.1 * Math.sin(i * 0.13 + j),
+        0.4 + 0.1 * Math.cos(i * 0.13 + j)
+      ]]))
+    }))
+  }));
+  const report = analyze({ source: 'hand', handTarget: 'indexTip', poseFrames, durationMs: 10000 });
+  assert.equal(report.sufficient, true);
+  assert.equal(report.payload.samples.length, 60);
+  assert.ok(report.payload.samples.every((frame) =>
+    frame.hands.length === 2 && frame.hands.every((hand) => Object.keys(hand.joints).length === 21)));
+  assert.ok(Buffer.byteLength(JSON.stringify(report.payload), 'utf8') < MAX_BODY_BYTES);
+  // Worst-length rounded coordinates and timestamps also fit the request bound.
+  const largest = structuredClone(report.payload);
+  largest.samples.forEach((frame, i) => {
+    frame.t = 1000.001 + i * 100;
+    frame.hands.forEach((hand) => Object.keys(hand.joints).forEach((name) => {
+      hand.joints[name] = [0.12345, 0.98765];
+    }));
+  });
+  assert.ok(Buffer.byteLength(JSON.stringify(largest), 'utf8') < MAX_BODY_BYTES);
+  assert.deepEqual(validateMotion(report.payload), report.payload);
+  const response = await handleApi(request(report.payload), { env, fetchImpl: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), report.payload);
+    const prompt = body.systemInstruction.parts[0].text;
+    assert.match(prompt, /해부학적 왼손·오른손을 뜻하지 않는다/);
+    assert.match(prompt, /두 손이 동시에 보인 연속 구간에서만/);
+    assert.match(prompt, /한 손씩 번갈아 관측된 기록으로 두 손의 협응을 상상하지 않는다/);
+    assert.match(prompt, /같은 시간 구간을 두 번 세지 않는다/);
+    assert.equal(body.generationConfig.responseSchema.properties.qualities.minItems, 3);
+    assert.equal(body.generationConfig.responseSchema.properties.qualities.maxItems, 3);
+    return goodResponse();
+  } });
+  assert.equal(response.status, 200);
+});
+
+test('legacy single-hand API clients are accepted and normalized to a single track', async () => {
+  const { handleApi, validateMotion } = await handler;
+  const legacy = {
+    source: 'hand', handTarget: 'indexTip', durationMs: 1000, sampleCount: 20,
+    metrics: { meanSpeed: 0.3, validFrameRatio: 1 },
+    samples: [
+      { t: 0, joints: { wrist: [0.3, 0.5], indexTip: [0.3, 0.2] } },
+      { t: 1000, segment: 1, joints: { wrist: [0.3, 0.5], indexTip: [0.7, 0.2] } }
+    ]
+  };
+  const normalized = validateMotion(legacy);
+  assert.deepEqual(normalized.samples[0], {
+    t: 0, hands: [{ id: 1, joints: legacy.samples[0].joints }]
+  });
+  assert.equal(normalized.samples[1].segment, 1);
+  const response = await handleApi(request(legacy), { env, fetchImpl: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), normalized);
+    return goodResponse();
+  } });
+  assert.equal(response.status, 200);
+});
+
+test('dual-hand API rejects ambiguous IDs, mixed schemas, extra people and non-hand data', async () => {
+  const { handleApi } = await handler;
+  const dual = () => ({
+    source: 'hand', handTarget: 'indexTip', durationMs: 1000, sampleCount: 60,
+    metrics: { meanSpeed: 0.3, validFrameRatio: 1 },
+    samples: [0, 1000].map(t => ({
+      t, segment: 0,
+      hands: [1, 2].map(id => ({ id, joints: { wrist: [0.3, 0.5], indexTip: [0.7, 0.2] } }))
+    }))
+  });
+  for (const mutate of [
+    data => { data.samples[0].hands[1].id = 1; },
+    data => { data.samples[0].hands[1].id = 0; },
+    data => { data.samples[0].hands[1].id = 1.5; },
+    data => { data.samples[0].hands[1].id = Number.MAX_SAFE_INTEGER + 1; },
+    data => { data.samples[0].hands[1].id = 'Right'; },
+    data => { data.samples[0].hands.push({ ...data.samples[0].hands[0], id: 3 }); },
+    data => { data.samples[0].hands = []; },
+    data => { data.samples[0].hands[0].joints.nose = [0.5, 0.1]; },
+    data => { data.samples[0].hands[0].joints.leftWrist = [0.5, 0.1]; },
+    data => { delete data.samples[0].hands[1].joints.indexTip; },
+    data => { data.samples[0].hands[1].joints.indexTip = [Infinity, 0.5]; },
+    data => { data.samples[0].hands[0].image = 'data:image/png;base64,...'; },
+    data => { data.samples[0].joints = data.samples[0].hands[0].joints; },
+    data => { data.samples[1].joints = data.samples[1].hands[0].joints; delete data.samples[1].hands; },
+    data => { data.samples = Array(61).fill(data.samples[0]); data.sampleCount = 61; },
+    data => { data.intention = '초조한'; },
+  ]) {
+    const bad = dual(); mutate(bad);
+    const response = await handleApi(request(bad), { env, fetchImpl: noFetch });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'INVALID_MOTION');
+  }
+  const oneVisible = dual();
+  oneVisible.samples[1].hands = [oneVisible.samples[1].hands[1]];
+  assert.equal((await handleApi(request(oneVisible), { env, fetchImpl: async () => goodResponse() })).status, 200);
 });
 
 test('hand and body joint schemas stay separate and hand selection is constrained', async () => {

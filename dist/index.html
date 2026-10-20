@@ -6,11 +6,11 @@
   <meta name="theme-color" content="#111b20">
   <meta name="description" content="10초의 움직임이 하나의 잔상으로. 움직임을 그리고, 멈추고, 다시 바라보는 WebGL 실험.">
   <title>잔상 — 움직임을 남기는 방법</title>
-  <link rel="stylesheet" href="./styles.css?v=20261020-hand">
+  <link rel="stylesheet" href="./styles.css?v=20261020-two-hands">
   <script src="./config.js?v=20261020-webcam" defer></script>
-  <script src="./pose-camera.js?v=20261020-camera-open" defer></script>
-  <script src="./motion-analysis.js?v=20261020-hand" defer></script>
-  <script src="./app.js?v=20261020-hand" defer></script>
+  <script src="./pose-camera.js?v=20261020-two-hands" defer></script>
+  <script src="./motion-analysis.js?v=20261020-two-hands" defer></script>
+  <script src="./app.js?v=20261020-two-hands" defer></script>
 </head>
 <body data-view="intro">
   <header class="header">
@@ -89,25 +89,26 @@
     <button class="pause-button" id="pause"><span id="pause-icon" aria-hidden="true">Ⅱ</span><span id="pause-label">일시정지</span></button>
     <button class="finish-button" id="finish">결과 보기 <span aria-hidden="true">↗</span></button>
   </div>
-  <p class="drawing-hint" id="drawing-hint" hidden>손끝으로 공중에 그려보세요 · 손을 숨기면 잠시 멈춤 · Space 일시정지</p>
+  <p class="drawing-hint" id="drawing-hint" hidden>양손으로 공중에 그려보세요 · 두 손이 모두 안 보이면 잠시 멈춤</p>
   <section class="camera-panel" id="camera-panel" aria-label="웹캠 움직임 인식" hidden>
-    <div class="camera-heading"><span id="camera-mode-label">LIVE / HAND</span><button id="camera-cancel" aria-label="웹캠 종료하고 입력 선택으로 돌아가기">×</button></div>
+    <div class="camera-heading"><span id="camera-mode-label">LIVE / HANDS</span><button id="camera-cancel" aria-label="웹캠 종료하고 입력 선택으로 돌아가기">×</button></div>
     <div class="camera-preview"><video id="camera-video" autoplay playsinline muted aria-label="거울 방향 웹캠 미리보기"></video><canvas id="camera-overlay" aria-hidden="true"></canvas></div>
     <div id="hand-targets" class="hand-targets">
-      <p>어디로 그릴까요?</p>
-      <div class="segmented" role="group" aria-label="손 자취 기준">
+      <p>양손의 어디로 그릴까요?</p>
+      <div class="segmented" role="group" aria-label="양손 자취 기준">
         <button id="hand-index" aria-pressed="true">검지 끝</button>
         <button id="hand-wrist" aria-pressed="false">손목</button>
       </div>
       <small>기록 전에 선택해 주세요.</small>
     </div>
+    <p id="hand-count" class="hand-count" aria-live="polite">인식된 손 0 / 2</p>
     <label class="camera-select-label" for="camera-select">사용할 카메라</label>
     <select id="camera-select" disabled aria-describedby="camera-switch-note"><option value="">자동 선택</option></select>
     <p id="camera-switch-note" class="camera-note">영상에 X가 보이면 실제 카메라를 선택해 주세요.</p>
     <p id="camera-status" role="status">카메라를 준비하고 있어요.</p>
     <button class="camera-retry" id="camera-retry" hidden>카메라 다시 연결</button>
     <button class="primary" id="camera-record" disabled>10초 기록 시작 <span aria-hidden="true">↗</span></button>
-    <p id="camera-instructions" class="camera-note">한 손의 손바닥과 손가락을 보여주세요. 검지 끝의 움직임이 자취로 남습니다. 얼굴이나 전신은 필요 없어요.</p>
+    <p id="camera-instructions" class="camera-note">양손의 손바닥과 손가락을 보여주세요. 각 손의 검지 끝이 따로 자취를 남깁니다. 한 손만 보여도 기록할 수 있어요.</p>
   </section>
 
   <div class="tool-rail" id="tool-rail" hidden><span>TOOLS</span><button id="settings-toggle" aria-label="색상과 굵기 설정" aria-controls="settings" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5"/><circle cx="15" cy="17" r="2.5"/></svg><span>색·굵기</span></button></div>
@@ -139,10 +140,10 @@
     <h1 id="start-title">시작하시겠습니까?</h1>
     <p id="start-description">원을 그려도, 잠시 멈춰도 좋아요.<br>10초의 움직임이 하나의 잔상으로 남습니다.</p>
     <div class="input-modes" role="group" aria-label="움직임 입력 방식">
-      <button id="input-hand" aria-pressed="true"><span aria-hidden="true">⌁</span><strong>손끝으로 그리기</strong><small>웹캠 · 검지 끝 / 손목</small></button>
+      <button id="input-hand" aria-pressed="true"><span aria-hidden="true">⌁</span><strong>손끝으로 그리기</strong><small>웹캠 · 양손 인식</small></button>
       <button id="input-webcam" aria-pressed="false"><span aria-hidden="true">◎</span><strong>몸으로 남기기</strong><small>웹캠 · 전신 춤 인식</small></button>
     </div>
-    <p class="input-help" id="input-help">한 손만 보여주세요. 검지 끝 또는 손목으로 공중에 그립니다.</p>
+    <p class="input-help" id="input-help">양손을 함께 보여주세요. 각 손의 검지 끝 또는 손목으로 공중에 그립니다.</p>
     <label class="ai-consent"><input id="ai-consent" type="checkbox"><span>기록 후 AI로 인상 해석하기<small>영상 없이 움직임 좌표만 전송합니다. 무료 Gemini의 입력·출력은 서비스 개선에 사용될 수 있습니다.</small></span></label>
     <p id="dialog-error" class="dialog-error" hidden>WebGL을 사용할 수 없어 시작할 수 없습니다.<br>브라우저 설정을 확인하고 새로고침해 주세요.</p>
     <button class="primary" id="start" autofocus>웹캠 준비하기 <span aria-hidden="true">↗</span></button>

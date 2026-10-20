@@ -99,11 +99,12 @@ test('hand payload keeps 21 observed joints and at most 60 samples without face 
   assert.equal(result.sufficient, true);
   assert.equal(result.payload.sampleCount, 151);
   assert.equal(result.payload.samples.length, 60);
-  assert.equal(Object.keys(result.payload.samples.at(-1).joints).length, 21);
-  assert.equal(result.payload.samples[0].joints.pinkyTip, undefined);
-  assert.deepEqual(result.payload.samples.at(-1).joints.indexTip,
+  assert.equal(Object.keys(result.payload.samples.at(-1).hands[0].joints).length, 21);
+  assert.equal(result.payload.samples[0].hands[0].joints.pinkyTip, undefined);
+  assert.deepEqual(result.payload.samples.at(-1).hands[0].joints.indexTip,
     input.poseFrames.at(-1).joints.indexTip.map((v) => Math.round(v * 1e5) / 1e5));
-  assert.ok(result.payload.samples.every((frame) => !('nose' in frame.joints) && !('leftShoulder' in frame.joints)));
+  assert.ok(result.payload.samples.every((frame) =>
+    !('nose' in frame.hands[0].joints) && !('leftShoulder' in frame.hands[0].joints)));
   assert.ok(Buffer.byteLength(JSON.stringify(result.payload), 'utf8') < 100 * 1024);
 });
 
@@ -141,6 +142,141 @@ test('hand analysis needs actual hand observations and a continuous selected tra
   assert.doesNotMatch(result.local.description, /어깨|발끝|전신/);
   const defaultTarget = analyze({ ...input, handTarget: undefined });
   assert.equal(defaultTarget.payload.handTarget, 'indexTip');
+});
+
+function twoHands(position = (i) => [[0.2 + i * 0.005, 0.3], [0.6 + i * 0.005, 0.7]]) {
+  const input = handRecording();
+  input.poseFrames = input.poseFrames.map((frame, i) => ({
+    t: frame.t, segment: 0,
+    hands: position(i).map((point, n) => ({
+      id: n + 1, joints: { ...frame.joints, indexTip: point }
+    }))
+  }));
+  // New recordings use the actual selected joint of each observed hand; a
+  // flattened array of alternating hand points must never be a velocity path.
+  input.points = input.poseFrames.flatMap((frame) => frame.hands.map((hand) => ({
+    t: frame.t, handId: hand.id, stroke: hand.id,
+    x: hand.joints.indexTip[0], y: hand.joints.indexTip[1]
+  })));
+  return input;
+}
+
+test('two equally moving hands share elapsed time and retain independently sampled trails', () => {
+  const input = twoHands();
+  const both = analyze(input);
+  const single = analyze({
+    ...input, poseFrames: input.poseFrames.map((frame) => ({ ...frame, hands: frame.hands.slice(0, 1) }))
+  });
+  assert.equal(both.sufficient, true);
+  assert.equal(single.sufficient, true);
+  for (const name of ['meanSpeed', 'pathLength', 'trackedDurationMs', 'directionChangeRate']) {
+    assert.equal(both.payload.metrics[name], single.payload.metrics[name], name);
+  }
+  assert.equal(both.payload.metrics.trackedDurationMs, 3000);
+  assert.equal(both.payload.samples.length, 60);
+  assert.deepEqual(both.payload.samples[0].hands.map((hand) => hand.id), [1, 2]);
+  assert.match(both.local.caveat, /두 손의 검지 끝/);
+  assert.match(single.local.caveat, /한 손의 검지 끝/);
+});
+
+test('opposite directions retain their relationship without cancellation or false speed spikes', () => {
+  const parallel = analyze(twoHands());
+  const opposed = analyze(twoHands((i) => [[0.2 + i * 0.005, 0.3], [0.8 - i * 0.005, 0.7]]));
+  assert.equal(opposed.sufficient, true);
+  assert.ok(opposed.payload.metrics.meanSpeed > 0);
+  assert.equal(opposed.payload.metrics.meanSpeed, parallel.payload.metrics.meanSpeed);
+  assert.equal(opposed.payload.metrics.directionChangeRate, 0);
+  const first = opposed.payload.samples[0].hands;
+  const last = opposed.payload.samples.at(-1).hands;
+  assert.ok(last[0].joints.indexTip[0] > first[0].joints.indexTip[0]);
+  assert.ok(last[1].joints.indexTip[0] < first[1].joints.indexTip[0]);
+});
+
+test('both-hand recordings measure the selected wrists instead of moving fingertips', () => {
+  const input = twoHands();
+  const fingertips = analyze(input);
+  const wrists = analyze({ ...input, handTarget: 'wrist' });
+  assert.equal(wrists.sufficient, true);
+  assert.ok(fingertips.payload.metrics.meanSpeed > 0);
+  assert.equal(wrists.payload.metrics.meanSpeed, 0);
+  assert.equal(wrists.payload.metrics.stillnessRatio, 1);
+  assert.match(wrists.local.caveat, /두 손의 손목/);
+  assert.ok(wrists.payload.samples.every((frame) =>
+    frame.hands.every((hand) => hand.joints.wrist && hand.joints.indexTip)));
+});
+
+test('one moving hand remains measurable beside a stationary hand', () => {
+  const moving = analyze(twoHands((i) => [[0.1 + i * 0.01, 0.3]]));
+  const contrast = analyze(twoHands((i) => [[0.1 + i * 0.01, 0.3], [0.8, 0.7]]));
+  assert.ok(contrast.payload.metrics.meanSpeed > 0);
+  assert.ok(Math.abs(contrast.payload.metrics.meanSpeed * 2 - moving.payload.metrics.meanSpeed) < 0.00002);
+  assert.equal(contrast.payload.metrics.peakSpeed, moving.payload.metrics.peakSpeed);
+  assert.equal(contrast.payload.metrics.trackedDurationMs, moving.payload.metrics.trackedDurationMs);
+  assert.equal(contrast.payload.metrics.stillnessRatio, 0);
+});
+
+test('array order, lost hands and new IDs never connect one hand to another', () => {
+  const input = twoHands(() => [[0.1, 0.1], [0.9, 0.9]]);
+  input.poseFrames = input.poseFrames.map((frame, i) => ({
+    ...frame,
+    hands: i === 30 ? [frame.hands[1]] : frame.hands.map((hand) => (
+      hand.id === 1 && i > 30 ? { ...hand, id: 3, joints: { ...hand.joints, indexTip: [0.3, 0.3] } } : hand
+    )).sort((a, b) => i % 2 ? b.id - a.id : a.id - b.id)
+  }));
+  const result = analyze(input);
+  assert.equal(result.sufficient, true);
+  for (const name of ['meanSpeed', 'peakSpeed', 'pathLength', 'coverage', 'spread', 'directionChangeRate']) {
+    assert.equal(result.payload.metrics[name], 0, name);
+  }
+  assert.equal(result.payload.metrics.trackedDurationMs, 3000, 'the remaining visible hand stays continuous');
+  assert.ok(result.payload.samples.some((frame) => frame.hands.some((hand) => hand.id === 3)));
+});
+
+test('missing-hand frames and pause segments break only valid hand continuity', () => {
+  const input = twoHands(() => [[0.1, 0.1]]);
+  input.poseFrames = input.poseFrames.map((frame, i) => ({
+    ...frame,
+    segment: i < 45 ? 0 : 1,
+    hands: i === 30 ? [] : frame.hands.map((hand) => ({
+      ...hand, joints: { ...hand.joints, indexTip: i > 45 ? [0.9, 0.9] : i > 30 ? [0.5, 0.5] : [0.1, 0.1] }
+    }))
+  }));
+  // Relocate at the segment boundary itself, never one sample after it.
+  input.poseFrames[45].hands[0].joints.indexTip = [0.9, 0.9];
+  const result = analyze(input);
+  assert.equal(result.sufficient, true);
+  assert.equal(result.payload.metrics.meanSpeed, 0);
+  assert.equal(result.payload.metrics.coverage, 0);
+  assert.equal(result.payload.metrics.trackedDurationMs, 2850);
+  assert.equal(result.payload.metrics.validFrameRatio, 0.98361);
+  assert.equal(result.payload.sampleCount, 60);
+  assert.ok(result.payload.samples.every((frame) => frame.hands.length === 1));
+});
+
+test('new hand frames require enough actual observations and reject invalid or duplicated tracks', () => {
+  const input = twoHands();
+  const missingTarget = input.poseFrames.map((frame) => ({
+    ...frame, hands: frame.hands.map((hand) => {
+      const { indexTip, ...joints } = hand.joints;
+      return { ...hand, joints };
+    })
+  }));
+  assert.equal(analyze({ ...input, poseFrames: missingTarget }).sufficient, false);
+  const neverContinuous = input.poseFrames.map((frame, i) => ({
+    ...frame, hands: frame.hands.map((hand) => ({ ...hand, id: i * 2 + hand.id }))
+  }));
+  assert.equal(analyze({ ...input, poseFrames: neverContinuous }).sufficient, false);
+  const duplicated = input.poseFrames.map((frame) => ({
+    ...frame, hands: [
+      { ...frame.hands[0], id: -1 },
+      frame.hands[0], frame.hands[0],
+      { ...frame.hands[1], joints: { ...frame.hands[1].joints, nose: [0.4, 0.2] } }
+    ]
+  }));
+  const sanitized = analyze({ ...input, poseFrames: duplicated }).payload;
+  assert.ok(sanitized.samples.every((frame) =>
+    frame.hands.length === 2 && frame.hands[0].id !== frame.hands[1].id &&
+    frame.hands.every((hand) => !('nose' in hand.joints))));
 });
 
 test('footwork changes the impression when the upper body stays still', () => {

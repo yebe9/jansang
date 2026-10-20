@@ -126,6 +126,11 @@ function createApp({ fetchResponse, cameraStart } = {}) {
       this.options.onFrame({ timestamp, landmarks });
       if (animation) animation(timestamp);
     }
+    emitHands(timestamp, hands) {
+      now = timestamp;
+      this.options.onFrame({ timestamp, landmarks: [], hands });
+      if (animation) animation(timestamp);
+    }
   }
 
   const window = new Element('window');
@@ -552,7 +557,7 @@ function handLandmarks(index = 0) {
 }
 
 function recordHand(camera, start = 1000, count = 21, offset = 0) {
-  for (let i = 0; i < count; i++) camera.emit(start + i * 65, handLandmarks(i + offset));
+  for (let i = 0; i < count; i++) camera.emitHands(start + i * 65, [{id:1,landmarks:handLandmarks(i + offset)}]);
 }
 
 test('default hand mode replaces mouse input and records one fingertip trail with 21 hand joints', async () => {
@@ -563,7 +568,7 @@ test('default hand mode replaces mouse input and records one fingertip trail wit
   await flush();
   const camera = app.cameras.at(-1);
   assert.equal(camera.options.trackingMode, 'hand');
-  assert.equal(app.get('camera-mode-label').textContent, 'LIVE / HAND');
+  assert.equal(app.get('camera-mode-label').textContent, 'LIVE / HANDS');
   assert.equal(app.get('hand-targets').hidden, false);
   await app.get('canvas').dispatch('pointerdown', { pointerId: 1, button: 0, clientX: 30, clientY: 30 });
   await app.get('canvas').dispatch('pointermove', { pointerId: 1, clientX: 300, clientY: 300 });
@@ -577,8 +582,9 @@ test('default hand mode replaces mouse input and records one fingertip trail wit
   assert.equal(input.handTarget, 'indexTip');
   assert.equal(input.points.length, 21);
   assert.equal(new Set(input.points.map(p => p.stroke)).size, 1);
-  assert.equal(Object.keys(input.poseFrames[0].joints).length, 21);
-  assert.equal(input.poseFrames[0].joints.leftShoulder, undefined);
+  assert.equal(input.poseFrames[0].hands.length, 1);
+  assert.equal(Object.keys(input.poseFrames[0].hands[0].joints).length, 21);
+  assert.equal(input.poseFrames[0].hands[0].joints.leftShoulder, undefined);
   assert.equal(input.points.at(-1).x, handLandmarks(20)[8].x);
   assert.equal(report.sufficient, true, 'A visible hand needs no full-body gate');
   assert.equal(report.payload.source, 'hand');
@@ -649,7 +655,86 @@ test('hand AI request identifies the selected point without sending private inte
   const { payload, options } = app.calls[0];
   assert.equal(payload.source, 'hand');
   assert.equal(payload.handTarget, 'indexTip');
-  assert.ok(payload.samples.every(frame => frame.joints.indexTip && frame.joints.wrist && !frame.joints.leftShoulder));
+  assert.ok(payload.samples.every(frame => frame.hands[0].joints.indexTip && frame.hands[0].joints.wrist && !frame.hands[0].joints.leftShoulder));
   assert.ok(!options.body.includes('개인적인'));
   assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+});
+
+function twoHands(index = 0) {
+  const first = handLandmarks(index);
+  const second = handLandmarks(index).map(p => ({...p, x:1-p.x, y:p.y-0.1}));
+  return [{id:1,landmarks:first},{id:2,landmarks:second}];
+}
+
+test('both hands produce separate trails regardless of detector order and both reach AI', async () => {
+  const app = createApp({ fetchResponse: async () => ok(aiResult) });
+  app.get('ai-consent').checked = true;
+  const camera = await app.startHand();
+  for (let i = 0; i < 21; i++) {
+    const hands = twoHands(i);
+    camera.emitHands(1000 + i * 65, i % 2 ? hands.reverse() : hands);
+  }
+  assert.equal(app.get('hand-count').textContent, '인식된 손 2 / 2');
+  await app.click('finish');
+  await flush();
+  const {input,report} = app.reports.at(-1);
+  assert.equal(input.points.length, 42);
+  assert.equal(new Set(input.points.map(p => p.stroke)).size, 2);
+  assert.equal(input.durationMs, 1300, 'Two hands share one recording clock');
+  for (const id of [1,2]) {
+    const trail = input.points.filter(p => p.handId === id);
+    assert.equal(trail.length, 21);
+    assert.equal(new Set(trail.map(p => p.stroke)).size, 1);
+    assert.ok(trail.every((p,i) => p.x === twoHands(i)[id-1].landmarks[8].x));
+  }
+  assert.ok(input.poseFrames.every(f => f.hands.length === 2));
+  assert.equal(report.sufficient, true);
+  assert.equal(app.calls.length, 1);
+  assert.ok(app.calls[0].payload.samples.every(f => f.hands.length === 2));
+  assert.ok(Buffer.byteLength(app.calls[0].options.body) < 100 * 1024);
+});
+
+test('one hidden hand does not pause the other and a returning hand starts a separate trail', async () => {
+  const app = createApp();
+  const camera = await app.startHand();
+  for (let i = 0; i < 11; i++) camera.emitHands(1000 + i * 65, twoHands(i));
+  for (let i = 11; i < 21; i++) camera.emitHands(1000 + i * 65, [twoHands(i)[1]]);
+  assert.equal(app.get('hand-count').textContent, '인식된 손 1 / 2');
+  assert.match(app.get('stage-status').textContent, /REC/);
+  for (let i = 21; i < 31; i++) {
+    const hands = twoHands(i);
+    hands[0].id = 3; // adapter assigns a fresh identity after loss
+    camera.emitHands(1000 + i * 65, hands);
+  }
+  await app.click('finish');
+  const {input,report} = app.reports.at(-1);
+  assert.equal(input.durationMs, 1950);
+  assert.equal(new Set(input.poseFrames.map(f => f.segment)).size, 1, 'One visible hand keeps recording continuous');
+  assert.equal(new Set(input.points.filter(p => p.handId === 2).map(p => p.stroke)).size, 1);
+  assert.equal(new Set(input.points.map(p => p.stroke)).size, 3);
+  assert.equal(report.sufficient, true);
+  assert.ok(input.poseFrames.slice(11,21).every(f => f.hands.length === 1));
+});
+
+test('both hidden hands pause the shared clock; camera failure clears the live count', async () => {
+  const app = createApp();
+  const camera = await app.startHand('wrist');
+  for (let i = 0; i < 21; i++) camera.emitHands(1000 + i * 65, twoHands(i));
+  camera.emitHands(2400, []);
+  const count = app.get('point-count').textContent;
+  camera.emitHands(4500, []);
+  assert.equal(app.get('point-count').textContent, count);
+  assert.equal(app.get('hand-count').textContent, '인식된 손 0 / 2');
+  for (let i = 0; i < 11; i++) {
+    const hands = twoHands(i).map((h,j) => ({...h,id:j+3}));
+    camera.emitHands(5000 + i * 65, hands);
+  }
+  camera.options.onStatus({kind:'error',message:'Camera disconnected'});
+  assert.equal(app.get('hand-count').textContent, '인식된 손 0 / 2');
+  await app.click('finish');
+  const {input,report} = app.reports.at(-1);
+  assert.equal(input.durationMs, 2050);
+  assert.equal(new Set(input.points.map(p => p.stroke)).size, 4);
+  assert.deepEqual([...new Set(input.poseFrames.map(f => f.segment))],[1,2]);
+  assert.equal(report.payload.metrics.pathLength, 0, 'Stationary wrists remain stationary across the hidden gap');
 });

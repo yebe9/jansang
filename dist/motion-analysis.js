@@ -75,6 +75,31 @@
       .sort((a, b) => a.t - b.t);
   }
 
+  function sanitizeHandFrames(input, durationMs, target) {
+    return (Array.isArray(input) ? input : [])
+      .filter((frame) => frame && finite(frame.t) && frame.t >= 0 && frame.t <= durationMs)
+      .map((frame) => {
+        const seen = new Set();
+        const hands = [];
+        const observations = Array.isArray(frame.hands) ? frame.hands : [{ id: 1, joints: frame.joints }];
+        for (const hand of observations) {
+          if (!hand || !Number.isSafeInteger(hand.id) || hand.id <= 0 || seen.has(hand.id)) continue;
+          const joints = {};
+          for (const name of HAND_JOINTS) {
+            const point = coordinate(hand.joints && hand.joints[name]);
+            if (point) joints[name] = point;
+          }
+          if (!joints[target] || Object.keys(joints).length < 2) continue;
+          seen.add(hand.id);
+          hands.push({ id: hand.id, joints });
+          if (hands.length === 2) break;
+        }
+        const segment = Number.isSafeInteger(frame.segment) && frame.segment >= 0 ? frame.segment : 0;
+        return { t: frame.t, segment, hands };
+      })
+      .sort((a, b) => a.t - b.t);
+  }
+
   // Choose actual observations near equally spaced times, retaining both ends.
   // Never interpolate a missing joint or invent a path through a recording gap.
   function sampleEvenly(frames, limit = 60) {
@@ -93,7 +118,7 @@
     return [...selected].sort((a, b) => a - b).map((index) => frames[index]);
   }
 
-  function measure(source, data, aspect) {
+  function measure(source, data, aspect, handTarget = 'indexTip') {
     // Distances are fractions of the image diagonal, preserving the capture aspect.
     const diagonal = Math.hypot(aspect, 1);
     const vector = (a, b) => [(b[0] - a[0]) * aspect / diagonal, (b[1] - a[1]) / diagonal];
@@ -109,10 +134,14 @@
     let validFrames = 0;
     let fullBodyFrames = 0;
     let boundsId = 0;
+    const trackedHands = source === 'hand' && data.some((frame) => Array.isArray(frame.hands));
+    const frameJoints = (frame) => source === 'webcam' ? frame.joints
+      : trackedHands ? Object.fromEntries(frame.hands.map((hand) => [hand.id, hand.joints[handTarget]]))
+        : { pointer: [frame.x, frame.y] };
 
     for (const frame of data) {
-      const joints = source === 'webcam' ? frame.joints : { pointer: [frame.x, frame.y] };
-      const names = source === 'webcam' ? MOTION_JOINTS : ['pointer'];
+      const joints = frameJoints(frame);
+      const names = source === 'webcam' ? MOTION_JOINTS : trackedHands ? Object.keys(joints) : ['pointer'];
       const observed = names.filter((name) => joints[name]);
       if (observed.length) validFrames += 1;
       if (source === 'webcam' && FULL_BODY.every((name) => joints[name])) fullBodyFrames += 1;
@@ -131,12 +160,10 @@
       }
 
       const dt = previous ? frame.t - previous.t : 0;
-      const sameSegment = previous && (source === 'webcam'
+      const sameSegment = previous && (source === 'webcam' || trackedHands
         ? previous.segment === frame.segment : previous.stroke === frame.stroke);
       const continuous = sameSegment && dt >= MIN_INTERVAL_MS && dt <= MAX_INTERVAL_MS;
-      const previousJoints = previous
-        ? source === 'webcam' ? previous.joints : { pointer: [previous.x, previous.y] }
-        : {};
+      const previousJoints = previous ? frameJoints(previous) : {};
       // A body already occupies space while standing. Coverage measures each
       // joint's travel, never the rectangle between separate, stationary limbs.
       for (const name of observed) {
@@ -191,10 +218,11 @@
       const lower = source === 'webcam' ? group(LOWER_GROUPS) : null;
       const torso = source === 'webcam' ? group([TORSO]) : null;
       const available = source === 'webcam'
-        ? [upper, lower, torso].filter(Boolean) : [group([['pointer']])].filter(Boolean);
+        ? [upper, lower, torso].filter(Boolean)
+        : [group([trackedHands ? names : ['pointer']])].filter(Boolean);
       if (available.length) {
-        // Use the most active body region. Stationary arms must not conceal
-        // footwork; adding two equally moving limbs must not double activity.
+        // Use the most active body region, or the mean of independently tracked
+        // hand targets. Two hands share one time interval, never double activity.
         const active = available.reduce((best, current) => current.speed > best.speed ? current : best);
         weightedTurns += active.turns;
         intervals.push({
@@ -253,7 +281,8 @@
     }
     for (const key of Object.keys(metrics)) metrics[key] = round(metrics[key]);
     const validData = source === 'webcam'
-      ? data.filter((frame) => MOTION_JOINTS.some((name) => frame.joints[name])) : data;
+      ? data.filter((frame) => MOTION_JOINTS.some((name) => frame.joints[name]))
+      : trackedHands ? data.filter((frame) => frame.hands.length) : data;
     const span = validData.length ? validData[validData.length - 1].t - validData[0].t : 0;
     return {
       metrics,
@@ -261,9 +290,10 @@
     };
   }
 
-  function describe(metrics, sufficient, source, handTarget) {
+  function describe(metrics, sufficient, source, handTarget, handCount = 1) {
     const handLabel = handTarget === 'wrist' ? '손목' : '검지 끝';
-    const caveat = (source === 'hand' ? `인식된 한 손의 ${handLabel} 궤적만을 바탕으로, ` : '') +
+    const handsLabel = handCount > 1 ? '두 손' : '한 손';
+    const caveat = (source === 'hand' ? `인식된 ${handsLabel}의 ${handLabel} 궤적만을 바탕으로, ` : '') +
       '측정한 움직임을 간단한 규칙으로 표현한 기본 인상입니다. 실제 감정이나 의도를 판단한 결과가 아닙니다.';
     if (!sufficient) {
       return {
@@ -279,7 +309,7 @@
       };
     }
     const observations = [];
-    if (source === 'hand') observations.push(`인식된 한 손의 ${handLabel}이 남긴 자취를 따라 읽은 인상입니다.`);
+    if (source === 'hand') observations.push(`인식된 ${handsLabel}의 ${handLabel}이 남긴 자취를 따라 읽은 인상입니다.`);
     const fast = metrics.meanSpeed >= 0.65;
     const slow = metrics.meanSpeed < 0.2;
     const turns = metrics.directionChangeRate >= 1.3;
@@ -348,25 +378,38 @@
     const handTarget = input.handTarget === 'wrist' ? 'wrist' : 'indexTip';
     const durationMs = finite(input.durationMs) ? clamp(input.durationMs, 0, 10000) : 10000;
     const aspect = finite(input.captureAspect) ? clamp(input.captureAspect, 0.2, 5) : 1;
+    const dualHandFormat = source === 'hand' && Array.isArray(input.poseFrames) &&
+      input.poseFrames.some((frame) => frame && Array.isArray(frame.hands));
+    const handFrames = source === 'hand' ? sanitizeHandFrames(input.poseFrames, durationMs, handTarget) : [];
     const data = source === 'webcam'
       ? sanitizeFrames(input.poseFrames, durationMs)
-      : sanitizePoints(input.points, durationMs);
-    const measured = measure(source, data, aspect);
+      : dualHandFormat ? handFrames : sanitizePoints(input.points, durationMs);
+    const measured = measure(source, data, aspect, handTarget);
     const { metrics } = measured;
     let sufficient = measured.sufficient;
     let sampleData = data;
     if (source === 'hand') {
-      const frames = sanitizeFrames(input.poseFrames, durationMs, HAND_JOINTS);
-      sampleData = frames.filter((frame) => frame.joints[handTarget] && Object.keys(frame.joints).length >= 2);
-      // The selected trace drives the impression. Hand observations are also
-      // required so pointer-only input cannot masquerade as a camera recording.
+      sampleData = handFrames.filter((frame) => frame.hands.length);
+      // The selected target drives the impression. Legacy single-hand recordings
+      // use their trace; new recordings measure each target by stable track ID.
+      // Actual hand observations are required in either case.
       sufficient = sufficient && sampleData.length >= 8 &&
         sampleData.at(-1).t - sampleData[0].t >= 1000;
-      metrics.validFrameRatio = round(frames.length ? sampleData.length / frames.length : 0);
+      metrics.validFrameRatio = round(handFrames.length ? sampleData.length / handFrames.length : 0);
     }
     const samples = sampleEvenly(sampleData).map((frame) => {
       if (source !== 'webcam' && source !== 'hand') {
         return { t: Math.min(durationMs, round(frame.t, 3)), x: round(frame.x), y: round(frame.y), stroke: frame.stroke };
+      }
+      if (source === 'hand') {
+        return {
+          t: Math.min(durationMs, round(frame.t, 3)), segment: frame.segment,
+          hands: frame.hands.map((hand) => ({
+            id: hand.id,
+            joints: Object.fromEntries(Object.entries(hand.joints).map(([name, point]) =>
+              [name, point.map((value) => round(value))]))
+          }))
+        };
       }
       const joints = {};
       for (const [name, point] of Object.entries(frame.joints)) joints[name] = point.map((value) => round(value));
@@ -376,7 +419,8 @@
     if (source === 'hand') payload.handTarget = handTarget;
     return {
       payload,
-      local: describe(metrics, sufficient, source, handTarget),
+      local: describe(metrics, sufficient, source, handTarget,
+        source === 'hand' ? Math.max(0, ...sampleData.map((frame) => frame.hands.length)) : 0),
       sufficient
     };
   }

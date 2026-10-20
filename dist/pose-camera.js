@@ -14,11 +14,14 @@
  * (face) are always null; slots 11–32 contain { x, y, z, visibility } for the
  * body. x is mirrored; x/y are clamped to [0, 1]. Missing shoulders, hips, or
  * ankles produce []. Consumers must check each joint's visibility >= 0.5.
- * For hand, landmarks uses 21 hand slots (0 wrist, 8 index fingertip), without
- * any body or face points. Hand models do not return per-joint visibility:
- * this adapter sets visibility to 1 for finite in-frame points, otherwise 0.
- * Missing wrist/index MCP/index tip, a confident handedness switch, or a large
- * wrist discontinuity produces [] so consumers can start a separate stroke.
+ * For hand, onFrame({ landmarks: [], hands, timestamp }) contains up to two
+ * hands: [{ id, landmarks }]. Each hand has 21 slots (0 wrist, 8 index fingertip),
+ * without body or face points. Positive integer IDs identify continuously
+ * observed tracks, not permanent left/right identities. Missing or ambiguous
+ * hands get a fresh ID on reacquisition; IDs restart after stop/start.
+ * Result-array order never determines track identity. Hand models do not return
+ * per-joint visibility: finite in-frame points get 1, otherwise 0. A hand needs
+ * its wrist, index MCP, and index tip in frame. Smoothing is independent per ID.
  * onStatus({ kind, message }): loading | ready | tracking | missing | error.
  * onDevices({ devices, selectedDeviceId }): video inputs after permission;
  * devices contains only { deviceId, label }. Selection stays in this session.
@@ -151,7 +154,8 @@
       this._controller = null;
       this._trackListeners = [];
       this._smoothed = null;
-      this._handIdentity = null;
+      this._handTracks = [];
+      this._nextHandId = 1;
       this._status = '';
       this._lastPoseTime = -Infinity;
       this._lastInference = -Infinity;
@@ -311,7 +315,7 @@
         this._lastVideoTime = -1;
         this._stalled = false;
         this._emitStatus('ready', this.trackingMode === 'hand'
-          ? '카메라가 준비됐어요. 한 손의 손목부터 손가락 끝까지 화면 안에 보여 주세요.'
+          ? '카메라가 준비됐어요. 한 손 또는 양손의 손목부터 손가락 끝까지 화면 안에 보여 주세요.'
           : '카메라가 준비됐어요. 얼굴은 포함하지 않아도 돼요. 어깨부터 발끝까지 화면 안에 들어오도록 서 주세요.');
         if (!current()) return false;
         this._raf = requestAnimationFrame(timestamp => this._tick(timestamp, generation));
@@ -337,7 +341,7 @@
         runningMode: 'VIDEO',
         minTrackingConfidence: 0.55,
         ...(hand ? {
-          numHands: 1,
+          numHands: 2,
           minHandDetectionConfidence: 0.55,
           minHandPresenceConfidence: 0.55
         } : {
@@ -368,18 +372,21 @@
         try {
           result = this._detector.detectForVideo(this.video, timestamp);
           const hand = this.trackingMode === 'hand';
-          const landmarks = hand
-            ? this._filterHand(result.landmarks?.[0], timestamp, result.handedness?.[0]?.[0])
-            : this._filterPose(result.landmarks?.[0], timestamp);
-          this._draw(landmarks);
-          this._emitStatus(landmarks.length ? 'tracking' : 'missing',
-            landmarks.length
-              ? (hand ? '손의 움직임을 보고 있어요. 한 손의 손가락과 손목을 자유롭게 움직여 주세요.'
+          const hands = hand ? this._filterHands(result.landmarks, timestamp, result.handedness) : null;
+          const landmarks = hand ? [] : this._filterPose(result.landmarks?.[0], timestamp);
+          this._draw(landmarks, hands);
+          const detected = hand ? hands.length : landmarks.length;
+          this._emitStatus(detected ? 'tracking' : 'missing',
+            detected
+              ? (hand ? (hands.length === 2
+                ? '양손의 움직임을 보고 있어요. 두 손을 함께 자유롭게 움직여 주세요.'
+                : '한 손의 움직임을 보고 있어요. 다른 손도 화면 안에 보여주면 함께 기록해요.')
                 : '온몸의 움직임을 보고 있어요. 어깨부터 발끝까지 화면 안에서 자유롭게 움직여 주세요.')
-              : (hand ? '손을 찾고 있어요. 한 손의 손목과 검지 끝이 카메라 안에 보이도록 해 주세요.'
+              : (hand ? '손을 찾고 있어요. 한 손 또는 양손의 손목과 검지 끝이 카메라 안에 보이도록 해 주세요.'
                 : '몸 전체를 찾고 있어요. 얼굴은 필요 없어요. 어깨·골반·발목이 보이도록 한 걸음 물러나 주세요.'));
           // Consumer may call stop() (e.g. after its ten-second recording).
-          if (generation === this._generation) this.onFrame({ landmarks, timestamp });
+          if (generation === this._generation) this.onFrame(hand
+            ? { landmarks, hands, timestamp } : { landmarks, timestamp });
         } catch (_) {
           if (generation === this._generation) {
             this.stop();
@@ -394,10 +401,11 @@
         // clock rather than counting frozen video as observed movement.
         this._stalled = true;
         this._smoothed = null;
-        this._handIdentity = null;
+        this._handTracks = [];
         this._draw([]);
         this._emitStatus('missing', '카메라 영상을 기다리고 있어요. 다른 앱에서 카메라를 사용 중인지 확인해 주세요.');
-        if (generation === this._generation) this.onFrame({ landmarks: [], timestamp });
+        if (generation === this._generation) this.onFrame(this.trackingMode === 'hand'
+          ? { landmarks: [], hands: [], timestamp } : { landmarks: [], timestamp });
       }
       if (generation === this._generation) {
         this._raf = requestAnimationFrame(next => this._tick(next, generation));
@@ -446,47 +454,95 @@
       return smoothed.map(point => point ? { ...point } : null);
     }
 
-    _filterHand(raw, timestamp, handedness) {
+    _filterHands(rawHands, timestamp, handedness) {
       const valid = point => point && Number.isFinite(point.x) && Number.isFinite(point.y) &&
         point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1;
-      if (!raw || raw.length < 21 || ![0, 5, 8].every(index => valid(raw[index]))) {
-        this._smoothed = null;
-        this._handIdentity = null;
-        return [];
+      const candidates = (rawHands || []).slice(0, 2).flatMap((raw, index) => {
+        if (!raw || raw.length < 21 || ![0, 5, 8].every(joint => valid(raw[joint]))) return [];
+        const label = handedness?.[index]?.[0];
+        // Handedness confidence describes left/right, never joint visibility.
+        const identity = label?.score >= 0.75 && ['Left', 'Right'].includes(label.categoryName)
+          ? label.categoryName : null;
+        const palm = [0, 5, 9, 13, 17].map(joint => raw[joint]).filter(valid);
+        const anchor = {
+          x: 1 - palm.reduce((sum, point) => sum + point.x, 0) / palm.length,
+          y: palm.reduce((sum, point) => sum + point.y, 0) / palm.length
+        };
+        return [{ raw, identity, anchor }];
+      }).sort((a, b) => a.anchor.x - b.anchor.x || a.anchor.y - b.anchor.y);
+      const previous = this._handTracks.filter(track => timestamp - track.timestamp < 300);
+      const costs = candidates.map(candidate => previous.map(track => {
+        if (candidate.identity && track.identity && candidate.identity !== track.identity) return Infinity;
+        const distance = Math.hypot(candidate.anchor.x - track.anchor.x, candidate.anchor.y - track.anchor.y);
+        return distance <= 0.4 ? distance : Infinity;
+      }));
+      // With at most two hands, enumerate one-to-one assignments rather than
+      // greedily claiming a track. Detector order can change on any frame.
+      const assignments = [];
+      const assign = (index, used, matches, cost) => {
+        if (index === candidates.length) {
+          assignments.push({ matches: [...matches], count: used.size, cost });
+          return;
+        }
+        matches.push(-1);
+        assign(index + 1, used, matches, cost);
+        matches.pop();
+        previous.forEach((_, trackIndex) => {
+          if (used.has(trackIndex) || !Number.isFinite(costs[index][trackIndex])) return;
+          used.add(trackIndex);
+          matches.push(trackIndex);
+          assign(index + 1, used, matches, cost + costs[index][trackIndex]);
+          matches.pop();
+          used.delete(trackIndex);
+        });
+      };
+      assign(0, new Set(), [], 0);
+      assignments.sort((a, b) => b.count - a.count || a.cost - b.cost);
+      const best = assignments[0];
+      // Near-equal spatial assignments happen when hands cross/overlap or one
+      // vanishes between two candidates. Break only uncertain identities rather
+      // than drawing a false bridge between hands.
+      const ambiguous = new Set();
+      for (const alternative of assignments.slice(1)) {
+        if (alternative.count !== best.count || alternative.cost - best.cost > 0.06) continue;
+        alternative.matches.forEach((match, index) => {
+          if (match !== best.matches[index]) ambiguous.add(index);
+        });
       }
-      // Handedness confidence describes left/right, not point visibility. It is
-      // useful only for detecting a likely hand swap, never as joint confidence.
-      const identity = handedness?.score >= 0.75 &&
-        ['Left', 'Right'].includes(handedness.categoryName) ? handedness.categoryName : null;
-      const previous = timestamp - this._lastPoseTime < 300 ? this._smoothed : null;
-      const swapped = previous && identity && this._handIdentity && identity !== this._handIdentity;
-      const jumped = previous && Math.hypot(1 - raw[0].x - previous[0].x, raw[0].y - previous[0].y) > 0.4;
-      if (identity) this._handIdentity = identity;
-      if (swapped || jumped) {
-        this._smoothed = null;
-        return [];
-      }
-      const smoothed = Array.from({ length: 21 }, (_, index) => {
-        const landmark = raw[index];
-        const visibility = valid(landmark) ? 1 : 0;
-        const x = visibility ? 1 - landmark.x : 0.5;
-        const y = visibility ? landmark.y : 0.5;
-        const z = Number.isFinite(landmark?.z) ? landmark.z : 0;
-        const last = previous?.[index];
-        const alpha = last && last.visibility && visibility ? 0.65 : 1;
+      const retained = candidates.map((_, index) =>
+        ambiguous.has(index) ? null : previous[best.matches[index]]);
+      const usedColors = new Set(retained.filter(Boolean).map(track => track.color));
+      this._handTracks = candidates.map((candidate, index) => {
+        const track = retained[index];
+        const color = track?.color || (usedColors.has('#a9dac4') ? '#edab8d' : '#a9dac4');
+        usedColors.add(color);
+        const smoothed = Array.from({ length: 21 }, (_, joint) => {
+          const landmark = candidate.raw[joint];
+          const visibility = valid(landmark) ? 1 : 0;
+          const x = visibility ? 1 - landmark.x : 0.5;
+          const y = visibility ? landmark.y : 0.5;
+          const z = Number.isFinite(landmark?.z) ? landmark.z : 0;
+          const last = track?.landmarks[joint];
+          const alpha = last && last.visibility && visibility ? 0.65 : 1;
+          return {
+            x: last ? last.x + alpha * (x - last.x) : x,
+            y: last ? last.y + alpha * (y - last.y) : y,
+            z: last ? last.z + alpha * (z - last.z) : z,
+            visibility
+          };
+        });
         return {
-          x: last ? last.x + alpha * (x - last.x) : x,
-          y: last ? last.y + alpha * (y - last.y) : y,
-          z: last ? last.z + alpha * (z - last.z) : z,
-          visibility
+          id: track?.id || this._nextHandId++,
+          identity: candidate.identity || track?.identity || null,
+          anchor: candidate.anchor, timestamp, landmarks: smoothed, color
         };
       });
-      this._lastPoseTime = timestamp;
-      this._smoothed = smoothed;
-      return smoothed.map(point => ({ ...point }));
+      return this._handTracks.map(({ id, landmarks }) => ({
+        id, landmarks: landmarks.map(point => ({ ...point }))
+      })).sort((a, b) => a.id - b.id);
     }
 
-    _draw(landmarks) {
+    _draw(landmarks, hands = []) {
       const context = this.context;
       if (!context) return;
       const width = this.video.videoWidth || 640;
@@ -499,26 +555,31 @@
       const isVisible = point => point && point.visibility >= MIN_VISIBILITY;
       context.lineWidth = Math.max(2, width / 250);
       context.lineCap = 'round';
-      context.strokeStyle = 'rgba(169, 218, 196, 0.85)';
       const hand = this.trackingMode === 'hand';
-      for (const [from, to] of hand ? HAND_CONNECTIONS : BODY_CONNECTIONS) {
-        const a = landmarks[from];
-        const b = landmarks[to];
-        if (!isVisible(a) || !isVisible(b)) continue;
-        context.beginPath();
-        context.moveTo(a.x * width, a.y * height);
-        context.lineTo(b.x * width, b.y * height);
-        context.stroke();
-      }
-      // Hand indices start at the wrist; body mode skips all facial indices.
-      for (let index = hand ? 0 : 11; index < landmarks.length; index++) {
-        const point = landmarks[index];
-        if (!isVisible(point)) continue;
-        const highlighted = hand ? index === 0 || index === 8 : index === 15 || index === 16;
-        context.fillStyle = highlighted ? '#edab8d' : '#dcebe4';
-        context.beginPath();
-        context.arc(point.x * width, point.y * height, highlighted ? 6 : 3, 0, Math.PI * 2);
-        context.fill();
+      for (const track of hand ? hands : [{ landmarks }]) {
+        const points = track.landmarks;
+        const color = hand
+          ? this._handTracks.find(item => item.id === track.id)?.color || '#a9dac4' : '#a9dac4';
+        context.strokeStyle = color;
+        for (const [from, to] of hand ? HAND_CONNECTIONS : BODY_CONNECTIONS) {
+          const a = points[from];
+          const b = points[to];
+          if (!isVisible(a) || !isVisible(b)) continue;
+          context.beginPath();
+          context.moveTo(a.x * width, a.y * height);
+          context.lineTo(b.x * width, b.y * height);
+          context.stroke();
+        }
+        // Hand indices start at the wrist; body mode skips all facial indices.
+        for (let index = hand ? 0 : 11; index < points.length; index++) {
+          const point = points[index];
+          if (!isVisible(point)) continue;
+          const highlighted = hand ? index === 0 || index === 8 : index === 15 || index === 16;
+          context.fillStyle = highlighted ? (hand ? color : '#edab8d') : '#dcebe4';
+          context.beginPath();
+          context.arc(point.x * width, point.y * height, highlighted ? 6 : 3, 0, Math.PI * 2);
+          context.fill();
+        }
       }
     }
 
@@ -539,7 +600,8 @@
       closeDetector(this._detector);
       this._detector = null;
       this._smoothed = null;
-      this._handIdentity = null;
+      this._handTracks = [];
+      this._nextHandId = 1;
       this._lastPoseTime = -Infinity;
       if (this.context) this.context.clearRect(0, 0, this.overlay.width, this.overlay.height);
     }

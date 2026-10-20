@@ -21,6 +21,7 @@
 .hand-targets p{margin:0 0 7px;font-size:10px;color:#b5c6b9}
 .hand-targets small{display:block;margin-top:5px;font-size:9px;color:#8da597}
 .hand-targets .segmented button[aria-pressed=true]{background:#45463c;color:#f0c7ac}
+.hand-count{font-size:10px;color:#b6d5c6;line-height:1.6;margin:9px 0 0}
 .camera-select-label{display:block;color:#a7bfb0;font-size:10px;margin:12px 0 6px}
 #camera-select{width:100%;min-width:0;padding:9px 6px;border:1px solid #658b7b66;border-radius:6px;background:#142329;color:#dce7de;font-size:10px}
 #camera-select option{background:#142329;color:#dce7de}

@@ -27,6 +27,7 @@
   let inputMode = 'hand';
   let captureSource = 'hand';
   let handTarget = 'indexTip';
+  let trackedHandCount = 0;
   let camera = null;
   let cameraKind = 'loading';
   let cameraMessage = '';
@@ -390,17 +391,19 @@
       if (mode === 'armed') $('stage-status').textContent = cameraRequested
         ? (hand ? 'TRACKING / 손을 찾으면 이어서 기록합니다' : 'TRACKING / 몸을 찾으면 이어서 기록합니다')
         : 'READY / 자세를 잡고 기록을 시작하세요';
-      $('camera-mode-label').textContent = hand ? 'LIVE / HAND' : 'LIVE / FULL BODY';
+      $('camera-mode-label').textContent = hand ? 'LIVE / HANDS' : 'LIVE / FULL BODY';
       $('hand-targets').hidden = !hand;
+      $('hand-count').hidden = !hand;
+      $('hand-count').textContent = `인식된 손 ${trackedHandCount} / 2`;
       for (const [id, target] of [['hand-index', 'indexTip'], ['hand-wrist', 'wrist']]) {
         $(id).setAttribute('aria-pressed', String(handTarget === target));
         $(id).disabled = hasPoints || cameraRequested;
       }
       $('camera-instructions').textContent = hand
-        ? `한 손의 손바닥과 손가락을 보여주세요. ${handTargetLabel()}의 움직임이 자취로 남습니다. 얼굴이나 전신은 필요 없어요.`
+        ? `양손의 손바닥과 손가락을 보여주세요. 각 손의 ${handTargetLabel()}이 따로 자취를 남깁니다. 한 손만 보여도 기록할 수 있어요.`
         : '어깨부터 양발까지 보이게 서주세요. 손·발·몸의 중심이 잔상으로 남습니다. 얼굴 좌표는 기록·해석하지 않아요.';
       $('drawing-hint').textContent = hand
-        ? `${handTargetLabel()}으로 공중에 그려보세요 · 손을 숨기면 잠시 멈춤 · Space 일시정지`
+        ? `양손의 ${handTargetLabel()}으로 공중에 그려보세요 · 두 손이 모두 안 보이면 잠시 멈춤`
         : '양손·양발·몸의 중심으로 잔상을 남겨보세요 · 전신이 보여야 기록됩니다';
       $('camera-status').textContent = cameraMessage;
       $('camera-record').hidden = cameraRequested || points.length > 0;
@@ -421,7 +424,7 @@
         ? (cameraRequested ? '당신의 움직임을 기다려요.' : captureSource === 'hand' ? '손끝에서 시작되는, 작은 잔상.' : '몸으로 남기는, 작은 잔상.')
         : '움직임을 만날 준비 중';
       $('guide-copy').textContent = cameraKind === 'error' ? '왼쪽에서 카메라를 바꾸거나 다시 연결할 수 있어요.'
-        : cameraRequested ? (captureSource === 'hand' ? '한 손을 화면 안으로 옮겨주세요. 손이 보이면 시간이 흐릅니다.' : '어깨부터 양발까지 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.')
+        : cameraRequested ? (captureSource === 'hand' ? '손을 화면 안으로 옮겨주세요. 한 손 이상 보이면 시간이 흐릅니다.' : '어깨부터 양발까지 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.')
         : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
     } else {
       $('guide-title').textContent = '움직임으로 채워질 공간';
@@ -462,7 +465,7 @@
     $('input-webcam').setAttribute('aria-pressed', String(next === 'webcam'));
     $('input-help').textContent = next === 'webcam'
       ? '카메라 허용 후 자세를 잡고 시작하세요. 영상은 저장하지 않아요.'
-      : '한 손만 보여주세요. 검지 끝 또는 손목으로 공중에 그립니다.';
+      : '양손을 함께 보여주세요. 각 손의 검지 끝 또는 손목으로 공중에 그립니다.';
     $('start').firstChild.textContent = '웹캠 준비하기 ';
   }
 
@@ -471,6 +474,7 @@
     camera = null;
     cameraReady = false;
     cameraRequested = false;
+    trackedHandCount = 0;
     jointTracks.clear();
     $('camera-panel').hidden = true;
   }
@@ -483,6 +487,7 @@
     cameraKind = 'loading';
     cameraMessage = captureSource === 'hand' ? '카메라와 손 인식 모델을 준비하고 있어요.' : '카메라와 자세 인식 모델을 준비하고 있어요.';
     cameraReady = false;
+    trackedHandCount = 0;
     cameraRequested = points.length > 0;
     $('camera-panel').hidden = false;
     let current = null;
@@ -514,6 +519,7 @@
           if (status.kind === 'error') {
             pauseRecording();
             cameraReady = false;
+            trackedHandCount = 0;
           }
           refresh();
         },
@@ -535,8 +541,8 @@
     refresh();
   }
 
-  function receivePose({landmarks, timestamp:now}) {
-    if (view !== 'drawing' || !isCameraInput() || !cameraRequested || lost || mode === 'paused' || !$('settings').hidden) return;
+  function receivePose({landmarks = [], hands = [], timestamp:now}) {
+    if (view !== 'drawing' || !isCameraInput()) return;
     const hand = captureSource === 'hand';
     const jointIndices = hand ? {
       wrist:0,thumbCmc:1,thumbMcp:2,thumbIp:3,thumbTip:4,
@@ -550,14 +556,36 @@
       leftHip:23,rightHip:24,leftKnee:25,rightKnee:26,leftAnkle:27,rightAnkle:28,
       leftHeel:29,rightHeel:30,leftFootIndex:31,rightFootIndex:32
     };
-    const joints = {};
-    for (const [name,index] of Object.entries(jointIndices)) {
-      const p = landmarks[index];
-      if (p && p.visibility >= .5 && Number.isFinite(p.x) && Number.isFinite(p.y)) joints[name] = [clamp(p.x,0,1), clamp(p.y,0,1)];
+    const readJoints = raw => {
+      const joints = {};
+      for (const [name,index] of Object.entries(jointIndices)) {
+        const p = raw?.[index];
+        if (p && p.visibility >= .5 && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+          joints[name] = [clamp(p.x,0,1), clamp(p.y,0,1)];
+        }
+      }
+      return joints;
+    };
+    const observedHands = [];
+    const seenIds = new Set();
+    if (hand) {
+      for (const detected of hands.slice(0,2)) {
+        if (!Number.isInteger(detected.id) || detected.id < 1 || seenIds.has(detected.id)) continue;
+        const joints = readJoints(detected.landmarks);
+        if (!['wrist','indexMcp','indexTip'].every(name => joints[name])) continue;
+        seenIds.add(detected.id);
+        observedHands.push({id:detected.id,joints});
+      }
+      if (trackedHandCount !== observedHands.length) {
+        trackedHandCount = observedHands.length;
+        refresh();
+      }
     }
-    const required = hand ? ['wrist','indexMcp','indexTip']
-      : ['leftShoulder','rightShoulder','leftHip','rightHip','leftAnkle','rightAnkle'];
-    if (required.some(name => !joints[name])) {
+    if (!cameraRequested || lost || mode === 'paused' || !$('settings').hidden) return;
+    const joints = hand ? null : readJoints(landmarks);
+    const tracked = hand ? observedHands.length > 0
+      : ['leftShoulder','rightShoulder','leftHip','rightHip','leftAnkle','rightAnkle'].every(name => joints[name]);
+    if (!tracked) {
       if (mode === 'recording') {
         elapsed = recordTime(now);
         cursor = elapsed;
@@ -575,21 +603,29 @@
     }
     if (mode !== 'recording') return;
     const t = recordTime(now);
-    if (!poseFrames.length || t > poseFrames[poseFrames.length-1].t) poseFrames.push({t,joints,segment:poseSegment});
-    // One chosen hand point or five dance traces; all observed joints stay in analysis.
-    const traceJoints = hand ? joints : {...joints, bodyCenter:[
+    if (!poseFrames.length || t > poseFrames[poseFrames.length-1].t) {
+      poseFrames.push(hand ? {t,hands:observedHands,segment:poseSegment} : {t,joints,segment:poseSegment});
+    }
+    // Each visible hand has its own trail; missing hands never join another hand.
+    const traceJoints = hand ? null : {...joints, bodyCenter:[
       (joints.leftHip[0] + joints.rightHip[0])/2,
       (joints.leftHip[1] + joints.rightHip[1])/2
     ]};
-    for (const joint of hand ? [handTarget] : ['leftWrist','rightWrist','leftAnkle','rightAnkle','bodyCenter']) {
-      if (!traceJoints[joint]) { jointTracks.delete(joint); continue; }
-      const [x,y] = traceJoints[joint];
-      const prev = jointTracks.get(joint);
+    const traces = hand
+      ? observedHands.map(({id,joints}) => ({key:`hand:${id}`,xy:joints[handTarget],handId:id}))
+      : ['leftWrist','rightWrist','leftAnkle','rightAnkle','bodyCenter']
+        .filter(key => traceJoints[key]).map(key => ({key,xy:traceJoints[key]}));
+    const visibleKeys = new Set(traces.map(trace => trace.key));
+    for (const key of jointTracks.keys()) if (!visibleKeys.has(key)) jointTracks.delete(key);
+    for (const trace of traces) {
+      const [x,y] = trace.xy;
+      const prev = jointTracks.get(trace.key);
       const connected = prev && t > prev.t && t-prev.t < 350;
       const p = {x,y,t,stroke:connected ? prev.stroke : ++stroke,speed:0};
+      if (hand) p.handId = trace.handId;
       if (connected) p.speed = prev.speed*.5 + Math.hypot((x-prev.x)*captureAspect,y-prev.y)/((t-prev.t)/1000)*.5;
       points.push(p);
-      jointTracks.set(joint,p);
+      jointTracks.set(trace.key,p);
     }
     cursor = t;
     dirty = true;
@@ -621,7 +657,7 @@
     $('result-duration').textContent=(duration/1000).toFixed(1);
     $('result-strokes').textContent=new Set(points.map(p=>p.stroke)).size;
     $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하거나 색을 바꿔 느낌을 비교해보세요.'
-      : captureSource === 'hand' ? `${handTargetLabel()}이 남긴 잔상입니다. 손의 좌표만 기록하고 영상은 저장하지 않았어요.`
+      : captureSource === 'hand' ? `보이는 각 손의 ${handTargetLabel()}이 남긴 잔상입니다. 손마다 자취를 나눠 기록했어요.`
       : '양손·양발·몸의 중심이 남긴 잔상입니다. 얼굴 좌표와 영상은 기록하지 않았어요.';
     openResult();
     $('result-panel').scrollTop = 0;
