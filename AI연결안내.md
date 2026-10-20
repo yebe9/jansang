@@ -2,7 +2,7 @@
 
 Ghosting은 실제 AI 응답을 받은 경우에만 움직임의 감상을 표시한다. API가 연결되지 않았거나 요청이 실패하면 연결·오류 안내를 보여주며 다른 감상으로 대체하지 않는다. 카메라 기록과 자취 재생은 키 없이 사용할 수 있다.
 
-현재 AI는 내 컴퓨터의 로컬 서버에서 사용한다. 공개 GitHub Pages에는 별도 AI 서버가 연결되어 있지 않다. 아래 공개 연결 절차는 나중에 원할 때만 진행한다.
+공개 GitHub Pages의 AI 요청은 [Cloudflare Worker](https://jansang-motion-api.jansang.workers.dev)를 거쳐 Gemini로 보낸다. Worker 배포와 `GEMINI_API_KEY` 비밀 값 등록을 마쳤고 `/api/status`의 사용 가능 상태를 확인했다. 방문자는 키를 입력하지 않는다. 로컬에서는 공개 설정과 관계없이 같은 컴퓨터의 API를 사용한다.
 
 ## 1. API 키와 모델
 
@@ -12,7 +12,7 @@ Ghosting은 실제 AI 응답을 받은 경우에만 움직임의 감상을 표�
 
 서버 요청 제한은 **13초**, 브라우저 대기 제한은 **15초**다. 제한에 도달하면 오류와 재시도 안내가 나온다. 15초 이내에 AI 해석이 반드시 성공한다는 뜻은 아니다. 서버는 같은 요청을 자동 재시도하지 않는다.
 
-실제 확인에서는 10초 길이의 합성 양손 좌표에 대해 **2.18초 만에 HTTP 200** 응답을 받았고, 인상 단어는 “유려한 · 매끄러운 · 유기적인”이었다. 이는 한 번의 합성 자료 측정이며 실제 손 인식 품질이나 응답 속도의 보장이 아니다.
+로컬 API 확인에서는 10초 길이의 합성 양손 좌표에 대해 **2.18초 만에 HTTP 200** 응답을 받았고, 인상 단어는 “유려한 · 매끄러운 · 유기적인”이었다. 이는 로컬의 한 번의 합성 자료 측정이며 공개 서버의 속도, 실제 손 인식 품질이나 응답 성공의 보장이 아니다.
 
 브라우저에서 무료 API 할당량 초과(429) 안내가 표시된 경우도 확인했다. 연결이 성공했던 키라도 남은 할당량에 따라 후속 요청은 실패할 수 있다.
 
@@ -36,10 +36,12 @@ Node.js 20.6 이상에서 프로젝트 폴더를 연다.
 
    실제 `.env`는 Git과 제출 ZIP에서 제외한다. `.env.example`에는 키를 넣지 않는다.
 
-3. `dist/config.js`의 `apiBase`는 빈 문자열로 둔다. 로컬에서는 같은 서버의 API에 연결한다.
+3. `dist/config.js`에는 공개 Worker 주소를 유지한다. `localhost` 또는 `127.0.0.1`에서 열면 이 설정과 관계없이 같은 서버의 `/api`를 사용한다.
 
    ```js
-   window.JANSANG_CONFIG = Object.freeze({ apiBase: '' });
+   window.JANSANG_CONFIG = Object.freeze({
+     apiBase: 'https://jansang-motion-api.jansang.workers.dev'
+   });
    ```
 
 4. 서버를 실행한다. 키나 모델을 바꾸었다면 기존 서버를 `Ctrl+C`로 종료하고 다시 실행한다.
@@ -56,39 +58,39 @@ Node.js 20.6 이상에서 프로젝트 폴더를 연다.
 
 손 입력은 한 손 또는 양손의 검지 끝·손목을 따로 그린다. 한 손이 사라져도 다른 손은 이어지고, 모두 사라지면 시간이 멈춘다. 전신 입력은 어깨·골반·양 발목이 함께 보여야 시작할 수 있다.
 
-## 3. 공개 Pages에 AI 연결하기 · 선택 사항
+## 3. 공개 AI 서버와 배포 관리
 
-GitHub Pages는 정적 파일만 제공한다. 키를 보관할 Cloudflare Worker를 별도 배포하고 그 주소를 연결해야 한다. Cloudflare 계정과 Wrangler가 지원하는 Node.js가 필요하다. [Workers 요금과 제한](https://developers.cloudflare.com/workers/platform/pricing/)
+GitHub Pages는 화면 파일을 제공하고, 배포된 [Cloudflare Worker](https://jansang-motion-api.jansang.workers.dev)가 키를 보관하며 Gemini를 호출한다. 키 등록은 완료되어 있으며 아래 명령은 서버 코드를 갱신하거나 키를 교체할 때 사용한다. Cloudflare 계정과 Wrangler가 지원하는 Node.js가 필요하다. [Workers 요금과 제한](https://developers.cloudflare.com/workers/platform/pricing/)
 
-1. 로그인한다.
+1. 배포할 Cloudflare 계정으로 로그인한다.
 
    ```powershell
    npx wrangler login
    ```
 
-2. `wrangler.toml`의 모델이 `gemini-3.5-flash-lite`, `ALLOWED_ORIGIN`이 `https://yebe9.github.io`인지 확인한 뒤 배포한다.
+2. 서버 코드를 수정했다면 `wrangler.toml`의 모델이 `gemini-3.5-flash-lite`, `ALLOWED_ORIGIN`이 `https://yebe9.github.io`인지 확인한 뒤 다시 배포한다.
 
    ```powershell
    npx wrangler deploy
    ```
 
-3. 비밀 입력 프롬프트에서 키를 등록한다. 키를 명령어 뒤에 붙이지 않는다.
+3. 키를 새로 등록하거나 교체할 때만 비밀 입력 프롬프트를 사용한다. 키를 명령어 뒤에 붙이지 않는다.
 
    ```powershell
    npx wrangler secret put GEMINI_API_KEY
    ```
 
-4. 배포 출력의 Worker 루트 HTTPS 주소를 `dist/config.js`에 넣는다. 아래는 형식 예시다.
+4. `dist/config.js`의 공개 주소는 다음과 같다. Worker 주소가 바뀐 경우에만 수정한다.
 
    ```js
    window.JANSANG_CONFIG = Object.freeze({
-     apiBase: 'https://jansang-motion-api.본인주소.workers.dev'
+     apiBase: 'https://jansang-motion-api.jansang.workers.dev'
    });
    ```
 
    끝에 `/api/analyze`를 붙이지 않는다. 이 파일에는 공개 주소만 넣는다.
 
-5. Git 저장소에서 설정을 반영하고 Pages 배포 후 실제 AI 요청을 확인한다.
+5. 공개 주소나 화면 설정을 바꿨다면 Git 저장소에 반영하고 Pages 배포 후 실제 AI 요청을 확인한다.
 
    ```powershell
    git add dist/config.js
@@ -116,7 +118,7 @@ MediaPipe는 브라우저 안에서 실행한다. 전신 모델 내부는 얼굴
 
 | 상태 | 확인할 내용 |
 | --- | --- |
-| AI 서버 연결 안내 | 로컬 서버를 실행했는지, 공개 Pages라면 실제 Worker 주소를 연결했는지 확인한다. |
+| AI 서버 연결 안내 | 로컬은 같은 컴퓨터의 서버 실행 상태를, 공개 Pages는 Worker 상태와 `dist/config.js` 주소를 확인한다. |
 | API 키가 연결되지 않음 | `.env` 로딩 또는 Worker 비밀 값 `GEMINI_API_KEY`를 확인한다. |
 | 모델 사용 권한·지역 오류 | AI Studio의 프로젝트와 `gemini-3.5-flash-lite` 사용 가능 여부를 확인한다. 모델을 바꿨다면 서버를 다시 실행한다. |
 | 시간 초과 | 서버 13초·화면 15초 제한에 도달한 상태다. 현재 요청이 끝난 뒤 다시 시도한다. 성공 응답을 보장하는 제한이 아니다. |

@@ -333,13 +333,15 @@
   }
 
   function apiBase() {
+    // A public Worker only accepts the deployed site's origin. Local sessions
+    // always use their own server and private environment, even after deployment.
+    if (['localhost','127.0.0.1','[::1]'].includes(location.hostname)) return '';
     const configured = (window.JANSANG_CONFIG?.apiBase || '').trim().replace(/\/+$/, '');
     if (configured) {
       const url = new URL(configured);
       if (url.protocol !== 'https:') throw new Error('AI 서버 주소는 HTTPS여야 합니다.');
       return configured;
     }
-    if (['localhost','127.0.0.1','[::1]'].includes(location.hostname)) return '';
     throw new Error('AI 서버가 아직 연결되지 않았습니다. Gemini 키와 서버를 연결한 뒤 다시 시도해 주세요.');
   }
 

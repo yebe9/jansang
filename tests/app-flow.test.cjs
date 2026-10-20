@@ -14,7 +14,7 @@ const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve();
 
 // A deliberately small event surface: rendering and camera hardware are mocked,
 // while app.js, motion measurements, event handlers and request bodies are real.
-function createApp({ fetchResponse, cameraStart, automaticAI = false, hostname = '127.0.0.1' } = {}) {
+function createApp({ fetchResponse, cameraStart, automaticAI = false, hostname = '127.0.0.1', apiBase = '' } = {}) {
   let now = 0;
   let animation;
   const timers = new Map();
@@ -141,7 +141,7 @@ function createApp({ fetchResponse, cameraStart, automaticAI = false, hostname =
   window.devicePixelRatio = 1;
   window.scrollTo = noop;
   window.JansangPoseCamera = Camera;
-  window.JANSANG_CONFIG = { apiBase: '' };
+  window.JANSANG_CONFIG = { apiBase };
   const context = vm.createContext({
     window, document, location: { hostname },
     performance: { now: () => now }, URL, AbortController, Map, Set, Float32Array,
@@ -852,6 +852,54 @@ test('an unavailable public API remains a plain error without fake impressions o
   assert.match(app.get('analysis-status').textContent, /서버가 아직 연결되지/);
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.get('analysis-evidence').hidden, true);
+});
+
+test('the public site sends AI requests to its configured HTTPS Worker endpoint', async () => {
+  const app = createApp({
+    automaticAI:true, hostname:'yebe9.github.io',
+    apiBase:' https://ghosting-test.example.workers.dev/// ',
+    fetchResponse:async () => ok(aiResult)
+  });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  await flush();
+  assert.equal(app.calls.length, 1);
+  assert.equal(app.calls[0].url, 'https://ghosting-test.example.workers.dev/api/analyze');
+  assert.equal(app.calls[0].options.credentials, 'omit');
+  assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+});
+
+test('all local hostnames retain their same-origin API after a public Worker is configured', async () => {
+  for (const hostname of ['127.0.0.1', 'localhost', '[::1]']) {
+    const app = createApp({
+      automaticAI:true, hostname,
+      apiBase:'https://ghosting-test.example.workers.dev',
+      fetchResponse:async () => ok(aiResult)
+    });
+    const camera = await app.startHand();
+    recordHand(camera);
+    await app.click('finish');
+    await flush();
+    assert.equal(app.calls.length, 1);
+    assert.equal(app.calls[0].url, '/api/analyze', `${hostname} must not call the public Worker`);
+    assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+  }
+});
+
+test('the public site rejects an insecure configured API without sending movement data', async () => {
+  const app = createApp({
+    automaticAI:true, hostname:'yebe9.github.io', apiBase:'http://ghosting-test.example.workers.dev'
+  });
+  const camera = await app.startHand();
+  recordHand(camera);
+  await app.click('finish');
+  await flush();
+  assert.equal(app.calls.length, 0);
+  assert.equal(app.get('analysis-dialog').open, false);
+  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.match(app.get('analysis-status').textContent, /HTTPS/);
+  assert.equal(app.get('analysis-qualities').children.length, 0);
 });
 
 test('insufficient movement explains the missing AI result without sending or showing a local fallback', async () => {
