@@ -3,7 +3,7 @@
 import { DANCE_VOCABULARY } from './dance-vocabulary.mjs';
 export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 export const MAX_BODY_BYTES = 100 * 1024;
-export const ANALYSIS_DEADLINE_MS = 19000;
+export const ANALYSIS_DEADLINE_MS = 29000;
 const MAX_FRAMES = 80;
 const PROVIDER_FRAME_LIMIT = 24;
 const DANCE_LABELS = DANCE_VOCABULARY.map(item => item.label);

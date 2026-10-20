@@ -382,7 +382,7 @@
     const controller = new AbortController();
     analysisController = controller;
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
     analysisBusy = true;
     analysis = null;
     analysisState = 'busy';
@@ -424,7 +424,7 @@
       analysisErrorCode = error.name === 'AbortError' ? (timedOut ? 'AI_TIMEOUT' : 'CANCELLED')
         : typeof error.code === 'string' ? error.code : 'NETWORK_ERROR';
       analysisMessage = error.name === 'AbortError'
-        ? (timedOut ? '20초 안에 AI 응답을 받지 못해 요청을 멈췄어요. 잔상은 남아 있으니 다시 해석할 수 있습니다.' : 'AI 해석을 취소했어요. 잔상은 그대로 남아 있습니다.')
+        ? (timedOut ? '30초 안에 AI 응답을 받지 못해 요청을 멈췄어요. 잔상은 남아 있으니 다시 해석할 수 있습니다.' : 'AI 해석을 취소했어요. 잔상은 그대로 남아 있습니다.')
         : analysisErrorCode === 'NETWORK_ERROR' ? 'AI 서버에 연결하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.' : error.message;
     } finally {
       clearTimeout(timeout);

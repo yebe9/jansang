@@ -769,29 +769,29 @@ test('automatic AI opens the progress modal and closes immediately on an early s
   assert.equal(app.get('analysis-badge').textContent, 'AI 해석 중');
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.calls.length, 1);
-  assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [20000]);
+  assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [30000]);
   resolve(ok(aiResult));
   await flush();
-  assert.equal(app.get('analysis-dialog').open, false, 'No fixed twenty-second wait after success');
+  assert.equal(app.get('analysis-dialog').open, false, 'No fixed thirty-second wait after success');
   assert.equal(app.get('ai-word').textContent, aiResult.analysis.impression);
   assert.equal(app.timers.size, 0);
 });
 
-test('twenty-second deadline closes a stalled fetch and ignores its late response', async () => {
+test('thirty-second deadline closes a stalled fetch and ignores its late response', async () => {
   let resolve;
   const response = new Promise(done => { resolve = done; });
   const app = createApp({ automaticAI:true, fetchResponse:() => response });
   const camera = await app.startHand();
   recordHand(camera);
   await app.click('finish');
-  const timeout = [...app.timers.values()].find(timer => timer.delay === 20000);
+  const timeout = [...app.timers.values()].find(timer => timer.delay === 30000);
   assert.ok(timeout);
   timeout.callback();
   await flush();
   assert.equal(app.calls[0].options.signal.aborted, true);
   assert.equal(app.get('analysis-dialog').open, false);
   assert.equal(app.get('analysis-badge').textContent, '해석 불가');
-  assert.match(app.get('analysis-status').textContent, /20초/);
+  assert.match(app.get('analysis-status').textContent, /30초/);
   assert.equal(app.get('analysis-status').dataset.code, 'AI_TIMEOUT');
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.get('analyze-button').disabled, false);
@@ -814,7 +814,7 @@ test('the same deadline covers a stalled response body rather than restarting af
   [...app.timers.values()][0].callback();
   await flush();
   assert.equal(app.get('analysis-dialog').open, false);
-  assert.match(app.get('analysis-status').textContent, /20초/);
+  assert.match(app.get('analysis-status').textContent, /30초/);
   resolveBody(aiResult);
   await flush();
   assert.equal(app.get('analysis-badge').textContent, '해석 불가');

@@ -528,16 +528,16 @@ test('the same deadline covers a stalled incoming body and rate limiter before a
   assert.equal(providerCalls, 0, 'A late limiter must not dispatch an AI request after timeout');
 });
 
-test('the timeout cannot be configured past the 19-second server budget', async t => {
+test('the timeout cannot be configured past the 29-second server budget', async t => {
   const { handleApi, ANALYSIS_DEADLINE_MS } = await handler;
-  assert.equal(ANALYSIS_DEADLINE_MS, 19000);
+  assert.equal(ANALYSIS_DEADLINE_MS, 29000);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let settled = false;
   const pending = handleApi(request(), {
     env, timeoutMs: 90000, fetchImpl: () => new Promise(() => {})
   }).then(result => { settled = true; return result; });
   await new Promise(resolve => setImmediate(resolve));
-  t.mock.timers.tick(18999);
+  t.mock.timers.tick(ANALYSIS_DEADLINE_MS - 1);
   await Promise.resolve();
   assert.equal(settled, false);
   t.mock.timers.tick(1);
@@ -679,7 +679,7 @@ test('transient 5xx and transport TypeError get at most one retry with one sanit
 
 test('quota, non-transient errors and insufficient remaining time never spend another provider call', async () => {
   const { handleApi } = await handler;
-  for (const [status, timeoutMs] of [[429, 19000], [401, 19000], [403, 19000], [404, 19000], [501, 19000], [503, 1000]]) {
+  for (const [status, timeoutMs] of [[429, 29000], [401, 29000], [403, 29000], [404, 29000], [501, 29000], [503, 1000]]) {
     let calls = 0;
     const response = await handleApi(request(), { env, timeoutMs, fetchImpl: async () => {
       calls++;
