@@ -15,7 +15,7 @@ const example = (id = 'record-one') => ({
   ] },
 });
 
-function harness({ session = true, records = [], fetch: customFetch, capture = true } = {}) {
+function harness({ session = true, records = [], fetch: customFetch, capture = true, autoSave = false } = {}) {
   class Element {
     constructor(tagName = 'div', attrs = '') {
       this.tagName = tagName; this.children = []; this.events = new Map(); this.attributes = new Map();
@@ -41,7 +41,7 @@ function harness({ session = true, records = [], fetch: customFetch, capture = t
   const win = new Element('window');
   const calls = [], messages = [], createdURLs = [], revokedURLs = [];
   const timers = new Map();
-  win.location = { search: capture ? '?capture=1' : '' };
+  win.location = { search: capture ? (autoSave ? '?capture=1&save=1' : '?capture=1') : '' };
   win.opener = { postMessage: (message, origin) => messages.push({ message, origin }) };
   Object.assign(win, { Blob, FormData, AbortController });
   win.URL = { createObjectURL(blob) { const url = `blob:test-${createdURLs.length}`; createdURLs.push({ url, blob }); return url; }, revokeObjectURL(url) { revokedURLs.push(url); } };
@@ -229,4 +229,74 @@ test('rubric exposes missing measurements and ranking mismatch without changing 
   assert.match(app.get('rubric-metrics').textContent, /captureAspect미측정/);
   assert.match(app.get('rubric-metrics').textContent, /movingRatio0/);
   assert.match(app.get('candidate-list').textContent, /82 \/ 100/);
+});
+
+
+test('a save request from the result saves after authenticated receipt without a second click', async () => {
+  const app = harness({ autoSave:true, fetch:(url,options) => url === '/api/records' && options.method === 'POST' ? reply({id:'record-one'}) : undefined });
+  await app.app.start();
+  assert.equal(app.calls.filter(c => c.url === '/api/records' && c.options.method === 'POST').length,0);
+  await app.capture(example(),null,{origin:'https://evil.test'});
+  assert.equal(app.calls.filter(c => c.options.method === 'POST').length,0);
+  await app.capture(example(),null);
+  assert.equal(app.calls.filter(c => c.url === '/api/records' && c.options.method === 'POST').length,1);
+  assert.ok(app.messages.some(m => m.message.type === 'ghosting:received' && m.message.id === 'record-one'));
+  assert.ok(app.messages.some(m => m.message.type === 'ghosting:saved' && m.message.id === 'record-one'));
+});
+
+test('resending the same capture while uploading acknowledges receipt without a duplicate upload', async () => {
+  let finish;
+  const response = new Promise(resolve => {finish=resolve;});
+  const app = harness({ autoSave:true,fetch:(url,options) => url === '/api/records' && options.method === 'POST' ? response : undefined });
+  await app.app.start();
+  const saving = app.capture(example(),null);
+  await flush();
+  await app.capture(example(),null);
+  assert.equal(app.calls.filter(c => c.url === '/api/records' && c.options.method === 'POST').length,1);
+  assert.equal(app.messages.filter(m => m.message.type === 'ghosting:received').length,2);
+  finish(reply({id:'record-one'}));
+  await saving;
+  assert.equal(app.messages.filter(m => m.message.type === 'ghosting:saved').length,1);
+});
+
+test('automatic save failure preserves the capture and reports the cause to the result for retry', async () => {
+  let attempts=0;
+  const app = harness({autoSave:true,fetch:(url,options) => {
+    if(url === '/api/records' && options.method === 'POST') return ++attempts === 1 ? reply({error:{message:'저장 공간 확인'}},503) : reply({id:'record-one'});
+  }});
+  await app.app.start(); await app.capture(example(),null);
+  assert.equal(app.get('pending-actions').hidden,false);
+  assert.match(app.get('detail-status').textContent,/저장 공간 확인/);
+  assert.ok(app.messages.some(m => m.message.type === 'ghosting:error' && m.message.id === 'record-one' && m.message.message === '저장 공간 확인'));
+  await app.get('save-capture').click();
+  assert.equal(attempts,2);
+  assert.ok(app.messages.some(m => m.message.type === 'ghosting:saved'));
+});
+
+test('expired login resumes a requested automatic save after signing in again', async () => {
+  let attempts=0;
+  const app = harness({autoSave:true,fetch:(url,options) => {
+    if(url === '/api/records' && options.method === 'POST') return ++attempts === 1 ? reply({},401) : reply({id:'record-one'});
+  }});
+  await app.app.start(); await app.capture(example(),null);
+  assert.equal(app.get('login-panel').hidden,false);
+  app.get('password').value='test-password-only';
+  await app.get('login-form').dispatch('submit');
+  assert.equal(attempts,2);
+  assert.ok(app.messages.some(m => m.message.type === 'ghosting:saved'));
+});
+
+
+test('a capture arriving during login does not retry a failed automatic save behind the user', async () => {
+  let finishList, attempts=0;
+  const listResponse=new Promise(resolve=>{finishList=resolve;});
+  const app=harness({autoSave:true,fetch:(url,options)=>{
+    if(url==='/api/records' && options.method==='POST'){ attempts++; return reply({error:{message:'retry explicitly'}},503); }
+    if(url==='/api/records')return listResponse;
+  }});
+  const starting=app.app.start(); await flush();
+  await app.capture(example(),null);
+  finishList(reply({records:[]})); await starting;
+  assert.equal(attempts,1);
+  assert.equal(app.get('pending-actions').hidden,false);
 });

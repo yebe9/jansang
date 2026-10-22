@@ -5,17 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#111b20">
   <meta name="description" content="10초의 움직임이 하나의 잔상으로. 움직임을 그리고, 멈추고, 다시 바라보는 WebGL 실험.">
-  <title>Ghosting — 움직임을 남기는 방법</title>
-  <link rel="stylesheet" href="./styles.css?v=20261021-private-log">
-  <script src="./config.js?v=20261021-private-log" defer></script>
-  <script src="./pose-camera.js?v=20261021-private-log" defer></script>
-  <script src="./motion-analysis.js?v=20261021-private-log" defer></script>
-  <script src="./session-recorder.js?v=20261021-private-log" defer></script>
-  <script src="./app.js?v=20261021-private-log-v2" defer></script>
+  <title>잔상 : GHOSTING — 움직임을 남기는 방법</title>
+  <link rel="stylesheet" href="./styles.css?v=20261022-log-recovery">
+  <script src="./config.js?v=20261022-log-recovery" defer></script>
+  <script src="./pose-camera.js?v=20261022-log-recovery" defer></script>
+  <script src="./motion-analysis.js?v=20261022-log-recovery" defer></script>
+  <script src="./session-recorder.js?v=20261022-log-recovery" defer></script>
+  <script src="./app.js?v=20261022-log-recovery" defer></script>
 </head>
 <body data-view="intro">
   <header class="header">
-    <div class="brand"><span class="brand-mark" aria-hidden="true"><svg class="afterimage-mark" viewBox="0 0 80 72" fill="none" aria-hidden="true" focusable="false">        <path class="mark-echo mark-echo-far" d="M18 48C6 38 18 13 37 16C57 19 56 43 37 48C23 52 27 33 43 31C52 30 58 33 61 38"/>        <path class="mark-echo mark-echo-near" d="M18 48C6 38 18 13 37 16C57 19 56 43 37 48C23 52 27 33 43 31C52 30 58 33 61 38"/>        <path class="mark-line" d="M18 48C6 38 18 13 37 16C57 19 56 43 37 48C23 52 27 33 43 31C52 30 58 33 61 38"/>        <path class="mark-light" pathLength="100" d="M18 48C6 38 18 13 37 16C57 19 56 43 37 48C23 52 27 33 43 31C52 30 58 33 61 38"/>      </svg></span><span>Ghosting<small>TRACES OF MOVEMENT</small></span></div>
+    <div class="brand"><span class="brand-mark" aria-hidden="true"><svg class="afterimage-mark" viewBox="0 0 80 72" fill="none" aria-hidden="true" focusable="false">        <path class="mark-echo mark-echo-far" d="M18 48C6 38 18 13 37 16C57 19 56 43 37 48C23 52 27 33 43 31C52 30 58 33 61 38"/>        <path class="mark-echo mark-echo-near" d="M18 48C6 38 18 13 37 16C57 19 56 43 37 48C23 52 27 33 43 31C52 30 58 33 61 38"/>        <path class="mark-line" d="M18 48C6 38 18 13 37 16C57 19 56 43 37 48C23 52 27 33 43 31C52 30 58 33 61 38"/>        <path class="mark-light" pathLength="100" d="M18 48C6 38 18 13 37 16C57 19 56 43 37 48C23 52 27 33 43 31C52 30 58 33 61 38"/>      </svg></span><span><strong class="brand-title">잔상 : GHOSTING</strong><small>TRACES OF MOVEMENT</small></span></div>
     <nav class="journey" aria-label="체험 단계"><span id="step-start" aria-current="step"><b>01</b> 시작</span><i></i><span id="step-draw"><b>02</b> 움직임</span><i></i><span id="step-result"><b>03</b> 잔상</span></nav>
     <a id="log-link" class="log-link" target="_blank" rel="noopener noreferrer" hidden>비공개 로그 <span aria-hidden="true">↗</span></a>
   </header>
@@ -81,7 +81,7 @@
         <p id="video-status">영상 보관을 선택하지 않았어요. 의도와 AI 결과만 저장할 수 있습니다.</p>
         <button id="save-log" class="save-log">비공개 로그에 저장 <span aria-hidden="true">↗</span></button>
         <p id="log-save-status" role="status"></p>
-        <small>저장을 누르면 로그인한 비공개 로그로 의도·결과와 선택한 영상을 보냅니다. AI에는 영상이나 내 의도를 보내지 않습니다.</small>
+        <small>저장을 누르면 로그 창이 열리고, 로그인 후 의도·결과와 선택한 영상이 바로 저장됩니다. 저장 완료 표시를 확인해 주세요. AI에는 영상이나 내 의도를 보내지 않습니다.</small>
       </section>
       <div class="result-actions"><button class="primary" id="restart">새로운 움직임 만들기 <span aria-hidden="true">↗</span></button><button class="text-button" id="export">↓ 잔상 이미지 저장</button></div>
       <p class="privacy-note">AI 해석에는 움직임 좌표만 Google로 전송됩니다. 영상은 보관을 선택한 경우 이 기기에 임시 보관되며, ‘비공개 로그에 저장’을 누를 때만 로그 서버로 보냅니다. 무료 AI의 입력·출력은 서비스 개선에 사용될 수 있습니다.</p>

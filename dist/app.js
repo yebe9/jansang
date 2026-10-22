@@ -57,7 +57,6 @@
   let logPopup = null;
   let logOrigin = '';
   let logPending = null;
-  let logSent = false;
   let logSavedId = '';
   let logMessage = '';
   let gl, program, buffer, position, color, edge, opacity;
@@ -332,9 +331,8 @@
     captureCreatedAt = new Date().toISOString();
     logPopup = null;
     logPending = null;
-    logSent = false;
     logSavedId = '';
-    logMessage = '';
+    logMessage = '아직 저장되지 않았어요. 비공개 로그에 저장을 눌러 이번 움직임을 보관해 주세요.';
   }
 
   function resumeVideoCapture() {
@@ -393,7 +391,7 @@
     if (!configured) throw new Error('비공개 로그 서버가 아직 연결되지 않았어요.');
     const url = new URL(configured + '/logs/');
     if (url.protocol !== 'https:') throw new Error('비공개 로그는 HTTPS 주소에서 열어야 합니다.');
-    if (capture) url.searchParams.set('capture','1');
+    if (capture) { url.searchParams.set('capture','1'); url.searchParams.set('save','1'); }
     return url;
   }
 
@@ -414,10 +412,9 @@
       };
       logOrigin = url.origin;
       logPending = {record,video:recordedVideo};
-      logSent = false;
       logPopup = window.open(url.href, '_blank');
       if (!logPopup) throw new Error('로그 창이 차단됐어요. 팝업을 허용한 뒤 다시 저장해 주세요.');
-      logMessage = '로그 창에서 로그인하면 이번 움직임을 비공개로 저장할 수 있어요.';
+      logMessage = '아직 저장 전이에요. 로그 창에서 로그인하면 바로 저장됩니다. 저장 완료 표시까지 두 창을 열어두세요.';
     } catch (error) {
       logMessage = error.message;
       logPending = null;
@@ -1077,16 +1074,17 @@
   $('save-log').addEventListener('click',savePrivateLog);
   window.addEventListener('message',event=>{
     if (!logPopup || event.source !== logPopup || event.origin !== logOrigin || !logPending) return;
-    if (event.data?.type === 'ghosting:ready' && !logSent) {
-      logSent = true;
+    if (event.data?.type === 'ghosting:ready') {
       logPopup.postMessage({type:'ghosting:capture',...logPending}, logOrigin);
-      logMessage = '로그 창에서 비공개 저장을 마무리하고 있어요.';
+      logMessage = '로그 창으로 기록을 보내고 있어요. 저장 완료를 기다려 주세요.';
+    } else if (event.data?.type === 'ghosting:received' && event.data.id === logPending.record.id) {
+      logMessage = '로그 창에서 기록을 받았어요. 비공개 저장 중입니다.';
     } else if (event.data?.type === 'ghosting:saved' && event.data.id === logPending.record.id) {
       logSavedId = logPending.record.id;
       logMessage = '비공개 로그에 저장했습니다.';
       logPending = null;
-    } else if (event.data?.type === 'ghosting:error') {
-      logMessage = '비공개 로그를 저장하지 못했어요. 로그 창의 안내를 확인해 주세요.';
+    } else if (event.data?.type === 'ghosting:error' && event.data.id === logPending.record.id) {
+      logMessage = '저장하지 못했어요. ' + (typeof event.data.message === 'string' ? event.data.message : '로그 창에서 다시 시도해 주세요.');
     }
     updateLogUI();
   });

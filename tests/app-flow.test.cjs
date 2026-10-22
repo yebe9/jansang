@@ -781,8 +781,8 @@ test('both hidden hands pause the shared clock; camera failure clears the live c
 test('Ghosting defaults to disclosed automatic AI and removes every monochrome UI binding', () => {
   const checkbox = html.match(/<input\b[^>]*id="ai-consent"[^>]*>/)?.[0];
   assert.match(checkbox, /\bchecked\b/);
-  assert.match(html, /<title>Ghosting/);
-  assert.match(html, /<span>Ghosting<small>/);
+  assert.match(html, /<title>잔상 : GHOSTING/);
+  assert.match(html, /<strong class="brand-title">잔상 : GHOSTING<\/strong><small>TRACES OF MOVEMENT<\/small>/);
   assert.doesNotMatch(html, /MOVEMENT READING|color-mono|result-color|mono-note|한 가지 색|단색/);
   assert.doesNotMatch(appSource, /motionReport\.local|analysisKind|colorMode|setColor|result-color|mono-note/);
   const app = createApp();
@@ -1122,7 +1122,7 @@ test('video is opt-in and private log data leaves only on an authorized popup ha
   assert.ok(!app.calls[0].options.body.includes('비공개'));
   await app.click('save-log');
   const popup = app.popups[0];
-  assert.equal(popup.url,logBase+'/logs/?capture=1');
+  assert.equal(popup.url,logBase+'/logs/?capture=1&save=1');
   assert.equal(popup.sent.length,0,'Wait for the actual log page to announce readiness');
   await app.window.dispatch('message',{source:popup,origin:'https://wrong.example',data:{type:'ghosting:ready'}});
   await app.window.dispatch('message',{source:{},origin:logBase,data:{type:'ghosting:ready'}});
@@ -1142,7 +1142,10 @@ test('video is opt-in and private log data leaves only on an authorized popup ha
   assert.equal(data.record.durationMs,1300);
   assert.ok(data.record.metrics.meanSpeed > 0);
   await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:ready'}});
-  assert.equal(popup.sent.length,1,'Repeated ready messages do not duplicate a transfer');
+  assert.equal(popup.sent.length,2,'A refreshed log page can receive the same pending record again');
+  assert.equal(popup.sent[1].data.record.id,data.record.id,'Resends keep the idempotent record ID');
+  await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:received',id:data.record.id}});
+  assert.match(app.get('log-save-status').textContent,/받았어요/);
   await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:saved',id:'other-record'}});
   assert.doesNotMatch(app.get('log-save-status').textContent,/저장했습니다/);
   await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:saved',id:data.record.id}});

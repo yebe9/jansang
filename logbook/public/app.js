@@ -40,7 +40,9 @@
     let pendingURL = null;
     let saving = false;
     let actionBusy = false;
-    let captureMode = new URLSearchParams(win.location.search).get('capture') === '1';
+    const captureParams = new URLSearchParams(win.location.search);
+    let captureMode = captureParams.get('capture') === '1';
+    const autoSave = captureMode && captureParams.get('save') === '1';
     let confirmation = null;
     const activeRequests = new Set();
     const downloadURLs = new Set();
@@ -148,9 +150,11 @@
       $('password').value = '';
       status('workspace-status', '');
       updateCaptureNotice();
+      const resumeCapture = pending;
       if (pending) showPending();
       announceReady();
       await refreshRecords();
+      if (resumeCapture && pending === resumeCapture && autoSave) await saveCapture();
     }
     async function checkSession() {
       const currentEpoch = epoch;
@@ -353,6 +357,10 @@
     }
     async function receiveCapture(event) {
       if (!captureAllowed(event, win.opener, authenticated, captureMode)) return;
+      if (pending && pending.record.id === event.data.record?.id) {
+        try { win.opener.postMessage({type:'ghosting:received',id:pending.record.id},event.origin); } catch {}
+        return;
+      }
       if (pending || saving) {
         status('workspace-status', '먼저 받은 기록이 저장 대기 중입니다. 저장하거나 취소한 뒤 원래 화면에서 다시 보내주세요.', true);
         return;
@@ -369,7 +377,9 @@
       pending = { record: event.data.record, video: video || null, origin: event.origin };
       updateCaptureNotice();
       showPending();
-      status('workspace-status', '움직임을 받았어요. 아래 내용을 확인한 뒤 저장해주세요.');
+      try { win.opener.postMessage({type:'ghosting:received',id:pending.record.id},event.origin); } catch {}
+      status('workspace-status', autoSave ? '원래 화면에서 요청한 기록을 비공개로 저장하고 있어요.' : '움직임을 받았어요. 아래 내용을 확인한 뒤 저장해주세요.');
+      if (autoSave) await saveCapture();
     }
     async function saveCapture() {
       if (!authenticated || !pending || saving || actionBusy) return;
@@ -396,7 +406,10 @@
         await selectRecord(id);
         status('workspace-status', result.alreadySaved ? '이미 저장된 기록이에요. 기존 영상과 분석 정보를 열었습니다.' : '기록을 저장했어요. 새 영상이 반영되기까지 잠시 걸릴 수 있어요.');
       } catch (error) {
-        if (authenticated && currentEpoch === epoch) status('detail-status', `${error.message} 저장 전 데이터는 이 창에 남아 있습니다.`, true);
+        if (authenticated && currentEpoch === epoch) {
+          status('detail-status', `${error.message} 저장 전 데이터는 이 창에 남아 있습니다. 아래 저장 버튼으로 다시 시도해주세요.`, true);
+          try { win.opener?.postMessage({type:'ghosting:error',id:capture.record.id,message:error.message},capture.origin); } catch {}
+        }
       } finally { saving = false; syncActions(); }
     }
     function confirmAction(title, message, label) {
