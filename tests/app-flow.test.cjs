@@ -781,8 +781,8 @@ test('both hidden hands pause the shared clock; camera failure clears the live c
 test('Ghosting defaults to disclosed automatic AI and removes every monochrome UI binding', () => {
   const checkbox = html.match(/<input\b[^>]*id="ai-consent"[^>]*>/)?.[0];
   assert.match(checkbox, /\bchecked\b/);
-  assert.match(html, /<title>잔상 : GHOSTING/);
-  assert.match(html, /<strong class="brand-title">잔상 : GHOSTING<\/strong><small>TRACES OF MOVEMENT<\/small>/);
+  assert.match(html, /<title>잔상:Ghosting - 움직임을 남기는 방법<\/title>/);
+  assert.match(html, /<strong class="brand-title">잔상<\/strong><small>TRACES OF MOVEMENT<\/small>/);
   assert.doesNotMatch(html, /MOVEMENT READING|color-mono|result-color|mono-note|한 가지 색|단색/);
   assert.doesNotMatch(appSource, /motionReport\.local|analysisKind|colorMode|setColor|result-color|mono-note/);
   const app = createApp();
