@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const root = path.join(__dirname, 'dist');
-const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
+const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.ttf': 'font/ttf' };
 const apiReady = import('./api/handler.mjs');
 let limiter;
 const server = http.createServer(async (req, res) => {
