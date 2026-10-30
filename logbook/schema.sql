@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS records (
   duration_ms REAL NOT NULL,
   impression TEXT,
   metadata TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
   video_bytes INTEGER NOT NULL DEFAULT 0,
   video_type TEXT NOT NULL DEFAULT '',
   video_key TEXT NOT NULL DEFAULT '',

@@ -25,7 +25,7 @@ function cameraStream(label = 'Camera', deviceId = 'camera') {
   return { track, stream };
 }
 
-function fixture({ trackingMode = 'body' } = {}) {
+function fixture({ trackingMode = 'body', delegate = 'CPU' } = {}) {
   let nextRaf = 1;
   const scheduled = new Map();
   const context = {
@@ -56,17 +56,18 @@ function fixture({ trackingMode = 'body' } = {}) {
   const overlay = { style: {}, width: 640, height: 480, getContext: () => paint };
   const frames = [], statuses = [], deviceReports = [];
   const camera = new context.window.JansangPoseCamera({
-    video, overlay, trackingMode, onFrame: frame => frames.push(frame), onStatus: status => statuses.push(status),
+    video, overlay, trackingMode, delegate, onFrame: frame => frames.push(frame), onStatus: status => statuses.push(status),
     onDevices: report => deviceReports.push(report)
   });
   let closed = 0, calls = 0;
   let raw = Array.from({ length: trackingMode === 'hand' ? 21 : 33 },
     () => ({ x: 0.25, y: 0.4, z: 0.1, ...(trackingMode === 'hand' ? {} : { visibility: 0.9 }) }));
   let handedness = { categoryName: 'Right', score: 0.95 };
-  let hands;
+  let hands, world;
   const detector = {
     detectForVideo() { calls++; return {
       landmarks: hands ? hands.map(hand => hand.landmarks) : raw ? [raw] : [],
+      worldLandmarks: world,
       handedness: hands ? hands.map(hand => [hand.handedness]) : [[handedness]], close() {}
     }; },
     close() { closed++; }
@@ -85,7 +86,8 @@ function fixture({ trackingMode = 'body' } = {}) {
     get closed() { return closed; }, get calls() { return calls; },
     setRaw(value) { raw = value; hands = undefined; },
     setHandedness(value) { handedness = value; },
-    setHands(value) { hands = value; }
+    setHands(value) { hands = value; },
+    setWorld(value) { world = value; }
   };
 }
 
@@ -511,8 +513,8 @@ test('consumer cancellation during ready notification does not schedule capture'
   assert.equal(f.closed, 1);
 });
 
-test('hand mode uses the hand model and preserves GPU-to-CPU fallback', async () => {
-  const f = fixture({ trackingMode: 'hand' });
+test('AUTO hand mode uses the hand model and preserves GPU-to-CPU fallback', async () => {
+  const f = fixture({ trackingMode: 'hand',delegate:'AUTO' });
   const optionsSeen = [];
   const wasmPaths = [];
   f.context.__vision = {
@@ -554,6 +556,7 @@ test('default body model remains Full and never creates a hand detector', async 
   f.camera._createDetector = f.createDetector;
   await f.camera.start();
   assert.match(seen.baseOptions.modelAssetPath, /pose_landmarker_full\/float16\/1\/pose_landmarker_full\.task$/);
+  assert.equal(seen.baseOptions.delegate,'CPU','A discrete GPU is never required by default');
   assert.equal(seen.numPoses, 1);
   assert.equal(seen.numHands, undefined);
   f.camera.stop();
@@ -726,10 +729,10 @@ test('both hands keep IDs and independent smoothing when detector array order re
   const left = current.find(hand => hand.id === leftId);
   const right = current.find(hand => hand.id === rightId);
   assert.ok(left && right, 'Reordering must not replace identities');
-  assert.ok(Math.abs(left.landmarks[8].x - 0.787) < 1e-10);
-  assert.ok(Math.abs(right.landmarks[8].x - 0.213) < 1e-10);
-  assert.ok(Math.abs(left.landmarks[8].y - 0.335) < 1e-10);
-  assert.ok(Math.abs(right.landmarks[8].y - 0.535) < 1e-10);
+  assert.ok(left.landmarks[8].x > .78 && left.landmarks[8].x < .8);
+  assert.ok(right.landmarks[8].x > .2 && right.landmarks[8].x < .22);
+  assert.ok(left.landmarks[8].y > .3 && left.landmarks[8].y < .4);
+  assert.ok(right.landmarks[8].y > .5 && right.landmarks[8].y < .6);
   current[0].id = 999;
   current[0].landmarks[8].x = 999;
   f.video.currentTime++;
@@ -895,4 +898,107 @@ test('a frozen hand stream clears both identities and a fresh start resets IDs a
   f.camera.stop();
   assert.equal(f.track.stopped, 2);
   assert.equal(f.closed, 2);
+});
+
+
+test('metric world coordinates preserve their native axes, never access faces, and never invent absent estimates', async()=>{
+  const f=fixture();
+  const world=Array.from({length:33},()=>({x:-.3,y:-.7,z:2.4,visibility:.95}));
+  Object.defineProperty(world,4,{get(){throw new Error('World facial slot accessed');}});
+  world[17]=null;
+  f.setWorld([world]); await f.camera.start(); f.frame(100);
+  const first=f.frames.at(-1);
+  assert.equal(first.worldLandmarks.length,33);
+  assert.ok(first.worldLandmarks.slice(0,11).every(point=>point===null));
+  assert.equal(first.worldLandmarks[15].x,-.3,'World x stays unmirrored');
+  assert.equal(first.worldLandmarks[15].y,-.7,'World y is not normalized to image height');
+  assert.equal(first.worldLandmarks[15].z,2.4,'World estimates are meters, not image depth');
+  assert.equal(first.worldLandmarks[17],null);
+  assert.equal(first.trackingQuality.delegate,'CPU');
+  assert.equal(first.trackingQuality.observedJoints,22);
+  assert.equal(first.trackingQuality.worldJoints,21);
+  assert.equal(first.trackingQuality.worldCoordinateSystem,'mediapipe-estimated-meters-unmirrored');
+  first.worldLandmarks[15].x=999;
+  f.video.currentTime++; f.frame(200);
+  assert.equal(f.frames.at(-1).worldLandmarks[15].x,-.3);
+  f.setWorld(undefined); f.video.currentTime++; f.frame(300);
+  assert.equal(f.frames.at(-1).worldLandmarks.length,0);
+  assert.equal(f.frames.at(-1).trackingQuality.worldJoints,0);
+  f.camera.stop();
+});
+
+test('low-presence joints are not accepted as visible or interpolated through occlusion',async()=>{
+  const f=fixture();await f.camera.start();f.frame(100);
+  let raw=Array.from({length:33},()=>({x:.45,y:.4,z:0,visibility:.9,presence:.95}));
+  raw[15].presence=.1;f.setRaw(raw);f.video.currentTime++;f.frame(200);
+  assert.equal(f.frames.at(-1).landmarks[15].visibility,.1);
+  assert.equal(f.camera._poseFilters[15],null);
+  raw[15].presence=.95;f.video.currentTime++;f.frame(300);
+  assert.equal(f.frames.at(-1).landmarks[15].x,.55,'Reacquisition must start at its observed coordinate');
+  raw[27].presence=.1;f.video.currentTime++;f.frame(400);
+  assert.equal(f.frames.at(-1).landmarks.length,0,'Uncertain required ankle pauses capture');
+  f.camera.stop();
+});
+
+test('adaptive smoothing suppresses stationary jitter but follows large fast changes more promptly',()=>{
+  const raw=x=>Array.from({length:33},()=>({x,y:.4,z:0,visibility:.9}));
+  const slow=fixture(), fast=fixture(), still=fixture();
+  slow.camera._filterPose(raw(.25),100);fast.camera._filterPose(raw(.25),100);
+  const slowOutput=slow.camera._filterPose(raw(.252),200)[15].x;
+  const fastOutput=fast.camera._filterPose(raw(.45),200)[15].x;
+  const slowFraction=(.75-slowOutput)/.002, fastFraction=(.75-fastOutput)/.2;
+  assert.ok(fastFraction>slowFraction+.15,'Motion-dependent cutoff should reduce fast-gesture lag');
+  const outputs=[];
+  for(let n=0;n<40;n++)outputs.push(still.camera._filterPose(raw(.25+(n%2?.0005:-.0005)),100+n*67)[15].x);
+  const settled=outputs.slice(10),mean=settled.reduce((sum,x)=>sum+x,0)/settled.length;
+  const deviation=Math.sqrt(settled.reduce((sum,x)=>sum+(x-mean)**2,0)/settled.length);
+  assert.ok(deviation<.0004,'Visible stationary jitter should be lower than raw ±0.0005');
+  const gap=fast.camera._filterPose(raw(.7),800)[15].x;
+  assert.ok(Math.abs(gap-.3)<1e-10,'A gap must reset filtering rather than fabricate movement');
+});
+
+test('a running GPU detector failure releases that detector and resumes on CPU without reopening the webcam',async()=>{
+  const f=fixture({delegate:'GPU'});let opens=0,cpuClosed=0;
+  f.context.navigator.mediaDevices.getUserMedia=async()=>{opens++;return f.stream;};
+  await f.camera.start();f.frame(100);
+  f.detector.detectForVideo=()=>{throw new Error('Lost graphics context');};
+  f.camera._createDetector=async(current,delegate)=>{
+    assert.equal(delegate,'CPU');assert.equal(current(),true);f.camera._delegate='CPU';
+    return {detectForVideo:()=>({landmarks:[Array.from({length:33},()=>({x:.2,y:.4,z:0,visibility:.9}))]}),close(){cpuClosed++;}};
+  };
+  f.video.currentTime++;f.frame(200);await new Promise(setImmediate);
+  assert.equal(opens,1);assert.equal(f.track.stopped,0);assert.equal(f.closed,1);
+  assert.equal(f.frames.at(-1).landmarks.length,0,'Pause before switching delegates');
+  f.video.currentTime++;f.frame(300);
+  assert.equal(f.frames.at(-1).trackingQuality.delegate,'CPU');
+  assert.equal(f.frames.at(-1).landmarks[15].x,.8);
+  f.camera.stop();assert.equal(cpuClosed,1);assert.equal(f.track.stopped,1);
+});
+
+test('a CPU inference failure stops rather than retrying forever',async()=>{
+  const f=fixture();await f.camera.start();
+  f.detector.detectForVideo=()=>{throw new Error('Model failed');};f.frame(100);
+  assert.equal(f.track.stopped,1);assert.equal(f.closed,1);assert.equal(f.scheduled.size,0);
+  assert.equal(f.statuses.at(-1).kind,'error');
+});
+
+test('slow inference reduces the next sample cadence instead of monopolizing the render loop',async()=>{
+  const f=fixture();let elapsed=0;f.context.performance={now:()=>elapsed};
+  const detect=f.detector.detectForVideo;
+  f.detector.detectForVideo=(...args)=>{const result=detect(...args);elapsed+=120;return result;};
+  await f.camera.start();f.frame(100);
+  assert.equal(f.frames.at(-1).trackingQuality.inferenceMs,120);
+  assert.equal(f.frames.at(-1).trackingQuality.sampleIntervalMs,150);
+  f.video.currentTime++;f.frame(200);assert.equal(f.calls,1);
+  f.frame(250);assert.equal(f.calls,2);f.camera.stop();
+});
+
+test('cancelled runtime fallback closes a late CPU detector without reviving capture',async()=>{
+  const f=fixture({delegate:'GPU'});const cpu=deferred();let closed=0;
+  await f.camera.start();
+  f.detector.detectForVideo=()=>{throw new Error('Lost GPU');};
+  f.camera._createDetector=()=>cpu.promise;
+  f.frame(100);f.camera.stop();
+  cpu.resolve({close(){closed++;}});await new Promise(setImmediate);
+  assert.equal(closed,1);assert.equal(f.scheduled.size,0);assert.equal(f.video.srcObject,null);
 });

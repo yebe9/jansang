@@ -8,14 +8,21 @@
  * video: HTMLVideoElement; overlay: HTMLCanvasElement laid over that video.
  * Both should fill the same box. This module uses object-fit: contain, mirrors
  * the video, and paints the matching mirrored skeleton into the overlay.
- * onFrame({ landmarks, timestamp }): <= 15 callbacks/sec, performance.now() in ms;
+ * onFrame({ landmarks, worldLandmarks, trackingQuality, timestamp }): <= 15 callbacks/sec.
+ * worldLandmarks is optional: 33 slots with facial slots 0–10 null, native
+ * (unmirrored) MediaPipe hip-centered estimated meters. Missing metric estimates
+ * produce [], never projected screen coordinates. trackingQuality reports only
+ * observed coverage/visibility and measured inference time, not accuracy.
+ * delegate: CPU (default), GPU, or AUTO (GPU with CPU fallback).
  * trackingMode is 'body' (default) or 'hand'. For body, landmarks is a fresh
  * array in MediaPipe's 33-slot index order. Slots 0–10
  * (face) are always null; slots 11–32 contain { x, y, z, visibility } for the
  * body. x is mirrored; x/y are clamped to [0, 1]. Missing shoulders, hips, or
  * ankles produce []. Consumers must check each joint's visibility >= 0.5.
  * For hand, onFrame({ landmarks: [], hands, timestamp }) contains up to two
- * hands: [{ id, landmarks }]. Each hand has 21 slots (0 wrist, 8 index fingertip),
+ * hands: [{ id, landmarks, worldLandmarks }]. Each hand has 21 slots (0 wrist, 8 index fingertip).
+ * Per-hand worldLandmarks, when available, use the native hand-centered estimated
+ * metric axes and remain paired with the track ID when detector order changes.
  * without body or face points. Positive integer IDs identify continuously
  * observed tracks, not permanent left/right identities. Missing or ambiguous
  * hands get a fresh ID on reacquisition; IDs restart after stop/start.
@@ -48,6 +55,36 @@
   const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
   const FRAME_INTERVAL = 1000 / 15;
   const MIN_VISIBILITY = 0.5;
+  const MAX_TRACK_GAP_MS = 300;
+  const now = () => globalThis.performance?.now?.() ?? Date.now();
+
+  // One Euro speed-adaptive low pass, independently reset at each occlusion.
+  // Casiez et al., CHI 2012: https://gery.casiez.net/1euro/
+  // These normalized-coordinate parameters are empirical tuning, not a quality benchmark.
+  class AdaptivePointFilter {
+    constructor() { this.last = null; }
+    filter(point, timestamp) {
+      const old = this.last;
+      if (!old || timestamp <= old.timestamp || timestamp - old.timestamp >= MAX_TRACK_GAP_MS) {
+        this.last = { raw:{...point}, value:{...point}, velocity:{x:0,y:0,z:0}, timestamp };
+        return {...point};
+      }
+      const dt = Math.max(1/120, (timestamp-old.timestamp)/1000);
+      const alpha = cutoff => 1/(1+1/(2*Math.PI*cutoff*dt));
+      const derivativeAlpha = alpha(1);
+      const velocity = {};
+      for (const axis of ['x','y','z']) {
+        const derivative=(point[axis]-old.raw[axis])/dt;
+        velocity[axis]=old.velocity[axis]+derivativeAlpha*(derivative-old.velocity[axis]);
+      }
+      const cutoff=1.5+5*Math.hypot(velocity.x,velocity.y,velocity.z);
+      const amount=alpha(cutoff);
+      const value={};
+      for (const axis of ['x','y','z']) value[axis]=old.value[axis]+amount*(point[axis]-old.value[axis]);
+      this.last={raw:{...point},value:{...value},velocity,timestamp};
+      return value;
+    }
+  }
   const BODY_CONNECTIONS = [
     [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
     [15, 17], [15, 19], [15, 21], [17, 19],
@@ -138,12 +175,21 @@
   }
 
   class JansangPoseCamera {
-    constructor({ video, overlay, trackingMode = 'body', onFrame = () => {}, onStatus = () => {}, onDevices = () => {} }) {
+    constructor({ video, overlay, trackingMode = 'body', delegate = 'CPU', onFrame = () => {}, onStatus = () => {}, onDevices = () => {} }) {
       if (!video || !overlay) throw new Error('카메라 미리보기 요소가 필요해요.');
       if (!['hand', 'body'].includes(trackingMode)) throw new Error('손 또는 전신 인식 모드를 선택해 주세요.');
       this.video = video;
       this.overlay = overlay;
+      if (!['CPU','GPU','AUTO'].includes(delegate)) throw new Error('CPU, GPU 또는 AUTO 실행 방식을 선택해 주세요.');
       this.trackingMode = trackingMode;
+      this.delegate = delegate;
+      this._delegate = delegate === 'AUTO' ? 'GPU' : delegate;
+      this._recovering = false;
+      this._cpuFallbackAttempted = false;
+      this._inferenceMs = 0;
+      this._frameInterval = FRAME_INTERVAL;
+      this._poseFilters = [];
+      this._worldFilters = [];
       this.context = overlay.getContext('2d');
       this.onFrame = onFrame;
       this.onStatus = onStatus;
@@ -199,8 +245,8 @@
             audio: false,
             video: {
               ...(selectedId ? { deviceId: { exact: selectedId } } : { facingMode: 'user' }),
-              width: { ideal: 640, max: 960 },
-              height: { ideal: 480, max: 720 },
+              width: { ideal: this.trackingMode === 'body' ? 960 : 640, max: 960 },
+              height: { ideal: this.trackingMode === 'body' ? 720 : 480, max: 720 },
               frameRate: { ideal: 15, max: 30 }
             }
           });
@@ -330,7 +376,7 @@
       }
     }
 
-    async _createDetector(current) {
+    async _createDetector(current, requestedDelegate = this.delegate) {
       const { FilesetResolver, PoseLandmarker, HandLandmarker } = await loadVision();
       if (!current()) throw abortError();
       const fileset = await FilesetResolver.forVisionTasks(`${PACKAGE}/wasm`);
@@ -338,7 +384,7 @@
       const hand = this.trackingMode === 'hand';
       const Detector = hand ? HandLandmarker : PoseLandmarker;
       const options = {
-        baseOptions: { modelAssetPath: hand ? HAND_MODEL : BODY_MODEL, delegate: 'GPU' },
+        baseOptions: { modelAssetPath: hand ? HAND_MODEL : BODY_MODEL, delegate: requestedDelegate === 'AUTO' ? 'GPU' : requestedDelegate },
         runningMode: 'VIDEO',
         minTrackingConfidence: 0.55,
         ...(hand ? {
@@ -352,29 +398,85 @@
           outputSegmentationMasks: false
         })
       };
+      const create = async delegate => {
+        options.baseOptions.delegate=delegate;
+        const detector=await Detector.createFromOptions(fileset,options);
+        if (current()) this._delegate=delegate;
+        return detector;
+      };
       try {
-        return await Detector.createFromOptions(fileset, options);
+        return await create(options.baseOptions.delegate);
       } catch (error) {
         if (!current()) throw abortError();
-        // Some devices cannot create a second GPU context alongside WebGL art.
-        options.baseOptions.delegate = 'CPU';
-        return Detector.createFromOptions(fileset, options);
+        if (options.baseOptions.delegate === 'CPU') throw error;
+        this._emitStatus('loading', 'CPU로 동작 인식을 준비하고 있어요.');
+        return create('CPU');
       }
+    }
+
+    _clearSmoothing() {
+      this._smoothed=null;
+      this._poseFilters=[];
+      this._worldFilters=[];
+      this._handTracks=[];
+      this._lastPoseTime=-Infinity;
+    }
+
+    _recoverCPU(generation) {
+      if (this._delegate === 'CPU' || this._cpuFallbackAttempted || this._recovering) return false;
+      this._cpuFallbackAttempted=true;
+      this._recovering=true;
+      closeDetector(this._detector);
+      this._detector=null;
+      this._clearSmoothing();
+      this._draw([]);
+      this._emitStatus('missing', 'CPU로 인식을 다시 연결하고 있어요. 잠시 멈춥니다.');
+      if (generation === this._generation) this.onFrame(this.trackingMode === 'hand'
+        ? {landmarks:[],hands:[],worldLandmarks:[],timestamp:now()} : {landmarks:[],worldLandmarks:[],timestamp:now()});
+      if (generation !== this._generation) return true;
+      this._createDetector(()=>generation === this._generation, 'CPU').then(detector=>{
+        if (generation !== this._generation) { closeDetector(detector); return; }
+        this._detector=detector;
+        this._recovering=false;
+        this._lastInference=-Infinity;
+        this._lastVideoTime=-1;
+        this._emitStatus('ready','CPU로 연결했어요. 움직임이 보이면 기록을 이어갑니다.');
+        if (generation === this._generation) this._raf=requestAnimationFrame(next=>this._tick(next,generation));
+      }).catch(()=>{
+        if (generation !== this._generation) return;
+        this.stop();
+        this._emitStatus('error','동작 인식이 중단됐어요. 카메라를 다시 시작해 주세요.');
+      });
+      return true;
     }
 
     _tick(timestamp, generation) {
       if (generation !== this._generation || !this._detector) return;
-      if (timestamp - this._lastInference >= FRAME_INTERVAL &&
+      if (timestamp - this._lastInference >= this._frameInterval &&
           this.video.readyState >= 2 && this.video.currentTime !== this._lastVideoTime) {
         this._lastInference = timestamp;
         this._lastVideoTime = this.video.currentTime;
         this._stalled = false;
         let result;
         try {
+          const inferenceStart=now();
           result = this._detector.detectForVideo(this.video, timestamp);
+          const elapsed=Math.max(0,now()-inferenceStart);
+          this._inferenceMs=this._inferenceMs ? this._inferenceMs*.8+elapsed*.2 : elapsed;
+          this._frameInterval=Math.max(FRAME_INTERVAL,Math.min(250,this._inferenceMs*1.25));
           const hand = this.trackingMode === 'hand';
-          const hands = hand ? this._filterHands(result.landmarks, timestamp, result.handedness) : null;
+          const hands = hand ? this._filterHands(result.landmarks, timestamp, result.handedness, result.worldLandmarks) : null;
           const landmarks = hand ? [] : this._filterPose(result.landmarks?.[0], timestamp);
+          const worldLandmarks=hand ? [] : this._filterWorld(result.worldLandmarks?.[0],landmarks,timestamp);
+          const observed=(hand ? hands.flatMap(item=>item.landmarks) : landmarks).filter(point=>point && point.visibility >= MIN_VISIBILITY);
+          const trackingQuality={
+            delegate:this._delegate,model:hand ? 'hand_landmarker' : 'pose_landmarker_full',
+            observedJoints:observed.length,expectedJoints:hand ? 21*hands.length : 22,
+            meanVisibility:observed.length ? observed.reduce((sum,point)=>sum+point.visibility,0)/observed.length : 0,
+            worldJoints:hand ? hands.reduce((sum,item)=>sum+(item.worldLandmarks?.filter(Boolean).length || 0),0) : worldLandmarks.filter(Boolean).length,
+            inferenceMs:Math.round(this._inferenceMs*100)/100,sampleIntervalMs:Math.round(this._frameInterval*100)/100,
+            worldCoordinateSystem:'mediapipe-estimated-meters-unmirrored'
+          };
           this._draw(landmarks, hands);
           const detected = hand ? hands.length : landmarks.length;
           this._emitStatus(detected ? 'tracking' : 'missing',
@@ -387,9 +489,9 @@
                 : '몸 전체를 찾고 있어요. 얼굴은 필요 없어요. 어깨·골반·발목이 보이도록 한 걸음 물러나 주세요.'));
           // Consumer may call stop() (e.g. after its ten-second recording).
           if (generation === this._generation) this.onFrame(hand
-            ? { landmarks, hands, timestamp } : { landmarks, timestamp });
+            ? { landmarks, hands, worldLandmarks, trackingQuality, timestamp } : { landmarks, worldLandmarks, trackingQuality, timestamp });
         } catch (_) {
-          if (generation === this._generation) {
+          if (generation === this._generation && (result || !this._recoverCPU(generation))) {
             this.stop();
             this._emitStatus('error', '동작 인식이 중단됐어요. 카메라를 다시 시작해 주세요.');
           }
@@ -401,14 +503,13 @@
         // another app temporarily takes it). Pause the consumer's recording
         // clock rather than counting frozen video as observed movement.
         this._stalled = true;
-        this._smoothed = null;
-        this._handTracks = [];
+        this._clearSmoothing();
         this._draw([]);
         this._emitStatus('missing', '카메라 영상을 기다리고 있어요. 다른 앱에서 카메라를 사용 중인지 확인해 주세요.');
         if (generation === this._generation) this.onFrame(this.trackingMode === 'hand'
           ? { landmarks: [], hands: [], timestamp } : { landmarks: [], timestamp });
       }
-      if (generation === this._generation) {
+      if (generation === this._generation && !this._recovering) {
         this._raf = requestAnimationFrame(next => this._tick(next, generation));
       }
     }
@@ -418,16 +519,19 @@
         Number.isFinite(raw[index].x) && Number.isFinite(raw[index].y) &&
         raw[index].x >= 0 && raw[index].x <= 1 &&
         raw[index].y >= 0 && raw[index].y <= 1 &&
-        (raw[index].visibility ?? 0) >= MIN_VISIBILITY;
+        (raw[index].visibility ?? 0) >= MIN_VISIBILITY &&
+        (!Number.isFinite(raw[index].presence) || raw[index].presence >= MIN_VISIBILITY);
       // A dance recording needs the torso and both legs in frame. Hands may
       // cross or briefly hide during a dance; they do not gate footwork.
       // Facial landmarks are deliberately not accessed, even for validation.
       if (!raw || raw.length < 33 ||
           ![11, 12, 23, 24, 27, 28].every(visible)) {
         this._smoothed = null;
+        this._poseFilters=[];
+        this._worldFilters=[];
         return [];
       }
-      const previous = timestamp - this._lastPoseTime < 300 ? this._smoothed : null;
+      if (timestamp-this._lastPoseTime >= MAX_TRACK_GAP_MS) this._poseFilters=[];
       const smoothed = Array.from({ length: 33 }, (_, index) => {
         if (index < 11) return null;
         const landmark = raw[index] || {};
@@ -438,24 +542,31 @@
         const inFrame = finite && landmark.x >= 0 && landmark.x <= 1 &&
           landmark.y >= 0 && landmark.y <= 1;
         const visibility = inFrame && Number.isFinite(landmark.visibility)
-          ? clamp(landmark.visibility) : 0;
-        const last = previous?.[index];
-        // Modest smoothing suppresses jitter without hiding sharp gestures.
-        const alpha = last && last.visibility >= MIN_VISIBILITY &&
-          visibility >= MIN_VISIBILITY ? 0.65 : 1;
-        return {
-          x: last ? last.x + alpha * (x - last.x) : x,
-          y: last ? last.y + alpha * (y - last.y) : y,
-          z: last ? last.z + alpha * (z - last.z) : z,
-          visibility
-        };
+          ? Math.min(clamp(landmark.visibility),Number.isFinite(landmark.presence) ? clamp(landmark.presence) : 1) : 0;
+        if (visibility < MIN_VISIBILITY) { this._poseFilters[index]=null; return {x,y,z,visibility}; }
+        const filter=this._poseFilters[index] ||= new AdaptivePointFilter();
+        return {...filter.filter({x,y,z},timestamp),visibility};
       });
       this._lastPoseTime = timestamp;
       this._smoothed = smoothed;
       return smoothed.map(point => point ? { ...point } : null);
     }
 
-    _filterHands(rawHands, timestamp, handedness) {
+    _filterWorld(raw, observed, timestamp) {
+      if (!raw || raw.length < 33 || !observed.length) { this._worldFilters=[]; return []; }
+      // Never inspect raw[0..10], including validity checks or copied metadata.
+      return Array.from({length:33},(_,index)=>{
+        if(index < 11) return null;
+        const point=raw[index];
+        const valid=point && ['x','y','z'].every(axis=>Number.isFinite(point[axis]) && Math.abs(point[axis]) <= 20);
+        const visibility=Math.min(observed[index]?.visibility || 0,Number.isFinite(point?.visibility) ? clamp(point.visibility) : 1);
+        if (!valid || visibility < MIN_VISIBILITY) { this._worldFilters[index]=null; return null; }
+        const filter=this._worldFilters[index] ||= new AdaptivePointFilter();
+        return {...filter.filter({x:point.x,y:point.y,z:point.z},timestamp),visibility};
+      });
+    }
+
+    _filterHands(rawHands, timestamp, handedness, rawWorldHands) {
       const valid = point => point && Number.isFinite(point.x) && Number.isFinite(point.y) &&
         point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1;
       const candidates = (rawHands || []).slice(0, 2).flatMap((raw, index) => {
@@ -469,9 +580,9 @@
           x: 1 - palm.reduce((sum, point) => sum + point.x, 0) / palm.length,
           y: palm.reduce((sum, point) => sum + point.y, 0) / palm.length
         };
-        return [{ raw, identity, anchor }];
+        return [{ raw, world:rawWorldHands?.[index], identity, anchor }];
       }).sort((a, b) => a.anchor.x - b.anchor.x || a.anchor.y - b.anchor.y);
-      const previous = this._handTracks.filter(track => timestamp - track.timestamp < 300);
+      const previous = this._handTracks.filter(track => timestamp - track.timestamp < MAX_TRACK_GAP_MS);
       const costs = candidates.map(candidate => previous.map(track => {
         if (candidate.identity && track.identity && candidate.identity !== track.identity) return Infinity;
         const distance = Math.hypot(candidate.anchor.x - track.anchor.x, candidate.anchor.y - track.anchor.y);
@@ -517,29 +628,31 @@
         const track = retained[index];
         const color = track?.color || (usedColors.has('#a9dac4') ? '#edab8d' : '#a9dac4');
         usedColors.add(color);
+        const filters=track?.filters || [];
         const smoothed = Array.from({ length: 21 }, (_, joint) => {
           const landmark = candidate.raw[joint];
           const visibility = valid(landmark) ? 1 : 0;
           const x = visibility ? 1 - landmark.x : 0.5;
           const y = visibility ? landmark.y : 0.5;
           const z = Number.isFinite(landmark?.z) ? landmark.z : 0;
-          const last = track?.landmarks[joint];
-          const alpha = last && last.visibility && visibility ? 0.65 : 1;
-          return {
-            x: last ? last.x + alpha * (x - last.x) : x,
-            y: last ? last.y + alpha * (y - last.y) : y,
-            z: last ? last.z + alpha * (z - last.z) : z,
-            visibility
-          };
+          if (!visibility) { filters[joint]=null; return {x,y,z,visibility}; }
+          const filter=filters[joint] ||= new AdaptivePointFilter();
+          return {...filter.filter({x,y,z},timestamp),visibility};
         });
+        const worldLandmarks=candidate.world?.length >= 21 ? Array.from({length:21},(_,joint)=>{
+          const point=candidate.world[joint];
+          return smoothed[joint].visibility && point && ['x','y','z'].every(axis=>Number.isFinite(point[axis]) && Math.abs(point[axis]) <= 20)
+            ? {x:point.x,y:point.y,z:point.z,visibility:1} : null;
+        }) : [];
         return {
           id: track?.id || this._nextHandId++,
           identity: candidate.identity || track?.identity || null,
-          anchor: candidate.anchor, timestamp, landmarks: smoothed, color
+          anchor: candidate.anchor, timestamp, landmarks: smoothed, worldLandmarks, filters, color
         };
       });
-      return this._handTracks.map(({ id, landmarks }) => ({
-        id, landmarks: landmarks.map(point => ({ ...point }))
+      return this._handTracks.map(({ id, landmarks, worldLandmarks }) => ({
+        id, landmarks: landmarks.map(point => ({ ...point })),
+        worldLandmarks:worldLandmarks.map(point=>point ? {...point} : null)
       })).sort((a, b) => a.id - b.id);
     }
 
@@ -600,10 +713,12 @@
       this.video.srcObject = null;
       closeDetector(this._detector);
       this._detector = null;
-      this._smoothed = null;
-      this._handTracks = [];
+      this._clearSmoothing();
+      this._recovering=false;
+      this._cpuFallbackAttempted=false;
+      this._inferenceMs=0;
+      this._frameInterval=FRAME_INTERVAL;
       this._nextHandId = 1;
-      this._lastPoseTime = -Infinity;
       if (this.context) this.context.clearRect(0, 0, this.overlay.width, this.overlay.height);
     }
   }

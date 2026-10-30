@@ -51,14 +51,19 @@
   let videoAttempted = false;
   let videoPending = false;
   let recordedVideo = null;
-  let videoMessage = '영상 보관을 선택하지 않았어요. 의도와 AI 결과만 저장할 수 있습니다.';
+  let videoMessage = '기록을 시작하면 소리 없이 영상도 자동 보관합니다.';
   let captureId = '';
   let captureCreatedAt = '';
-  let logPopup = null;
-  let logOrigin = '';
-  let logPending = null;
-  let logSavedId = '';
-  let logMessage = '';
+  let privateLogs = null;
+  let autoSaveMessage = '';
+  let autoSaveKind = '';
+  let autoSaveTimer = 0;
+  let captureRevision = 0;
+  let similarityResult = null;
+  let similarityMessage = '';
+  let similarityController = null;
+  let similarityVersion = 0;
+
   let gl, program, buffer, position, color, edge, opacity;
   let lost = false;
   const STRIDE = 7;
@@ -248,91 +253,70 @@
     intentComposing = false;
     $('intent-short').value = '';
     $('intent-detail').value = '';
-    document.querySelectorAll('.feelings button').forEach(b=>b.setAttribute('aria-pressed','false'));
+    similarityController?.abort(); similarityResult = null; similarityMessage = "";
     updateComparison();
   }
 
   function updateComparison() {
     const detail = $('intent-detail').value.trim();
-    $('intent-count').textContent = `${Array.from($('intent-short').value).length} / 5`;
+    $('intent-count').textContent = Array.from($('intent-short').value).length + ' / 5';
     $('intent-word').textContent = intendedFeeling || (detail ? '나만의 표현' : '선택 전');
-    $('intent-summary').textContent = detail || (intendedFeeling ? '내가 이 움직임으로 표현하려던 느낌입니다.' : '표현하려던 느낌을 위에서 남겨주세요.');
-    $('feeling-note').textContent = intendedFeeling || detail ? '의도를 남겼어요. AI에는 보내지 않으며, 로그 저장을 누르기 전까지 이 화면에만 남습니다.' : '직접 적거나 표현을 골라주세요. 로그 저장 전까지 이 화면에만 남습니다.';
-    const ai = Boolean(analysis);
-    $('analysis-badge').textContent = analysisBusy ? 'AI 해석 중' : ai ? 'Gemini 해석'
-      : analysisState === 'error' ? '해석 불가' : isExample ? '합성 예시 · 해석 대기' : '해석 대기';
+    $('intent-summary').textContent = detail || (intendedFeeling ? '내가 담으려던 느낌입니다.' : '위에 내 표현을 남겨주세요.');
+    $('feeling-note').textContent = intendedFeeling || detail ? '내 표현을 함께 자동 보관합니다.' : '두 가지 방식 중 편한 말로 움직임의 의도를 남겨보세요.';
     $('reading-label').textContent = '02 / AI READING';
     $('reading-title').textContent = 'AI가 느낀 움직임';
-    $('ai-word').textContent = analysis?.impression || (analysisBusy ? '해석 중'
-      : analysisState === 'error' ? analysisErrorTitle(analysisErrorCode) : analysisState === 'insufficient' ? '움직임이 부족해요' : '해석 대기');
-    $('analysis-qualities').replaceChildren(...(analysis?.qualities || []).slice(0,4).map(text => {
-      const tag = document.createElement('span'); tag.textContent = text; return tag;
-    }));
-    $('ai-summary').textContent = analysis?.description || (analysisBusy
-      ? 'AI가 움직임에서 전해지는 인상을 읽고 있습니다.' : '아직 AI가 생성한 결과가 없습니다.');
-    $('analysis-status').textContent = analysisMessage;
+    $('ai-word').textContent = analysis?.impression || (analysisBusy ? '움직임을 읽는 중' : analysisState === 'error' ? analysisErrorTitle(analysisErrorCode) : analysisState === 'insufficient' ? '움직임이 부족해요' : '움직임을 기다려요');
+    $('analysis-qualities').replaceChildren(...(analysis?.qualities || []).slice(0,4).map(text=>{const tag=document.createElement('span');tag.textContent=text;return tag;}));
+    $('ai-summary').textContent = analysis?.description || (analysisBusy ? '잠시만 기다려 주세요.' : analysisState === 'error' ? '아래에서 다시 시도할 수 있어요.' : '기록한 움직임의 인상이 여기에 도착합니다.');
+    $('analysis-status').textContent = analysisState === 'ready' ? '' : analysisMessage;
     $('analysis-status').dataset.code = analysisErrorCode;
+    $('analysis-status').hidden = !analysisMessage || analysisState === 'ready';
     $('analysis-evidence').hidden = !analysis;
-    $('analysis-observations').replaceChildren(...(analysis?.observations || []).map(text => {
-      const li = document.createElement('li'); li.textContent = text; return li;
+    $('analysis-observations').replaceChildren(...(analysis?.observations || []).map(text=>{const li=document.createElement('li');li.textContent=text;return li;}));
+    const candidates=Array.isArray(analysis?.candidates)?analysis.candidates.filter(c=>c&&typeof c.label==='string').slice(0,5):[];
+    const ranked=similarityResult?.results?.length?similarityResult.results:candidates;
+    $('analysis-candidates').hidden = !analysis;
+    $('similarity-status').textContent = similarityMessage || (analysis ? '내 표현을 남기면 다섯 인상과의 의미 유사도를 계산합니다.' : '');
+    $('candidate-list').replaceChildren(...ranked.map((item,index)=>{
+      const li=document.createElement('li');li.className='similarity-row';
+      const heading=document.createElement('div');heading.className='similarity-row-heading';
+      const label=document.createElement('strong');label.className='similarity-label';label.textContent=item.label;
+      const score=document.createElement('span');score.className='similarity-score';
+      const measured=typeof item.similarity==='number'&&Number.isFinite(item.similarity);
+      score.textContent=measured?item.similarity.toFixed(1):'—';heading.append(label,score);
+      const track=document.createElement('div');track.className='similarity-track'+(measured&&item.similarity<0?' is-negative':'');
+      const fill=document.createElement('span');fill.className='similarity-bar-fill';
+      fill.style.setProperty('--similarity',String(measured?Math.min(100,Math.abs(item.similarity)):0));
+      fill.style.setProperty('--similarity-delay',(index*70)+'ms');track.append(fill);
+      const evidence=document.createElement('p');evidence.className='similarity-evidence';evidence.textContent=item.evidence||'';
+      li.append(heading,track,evidence);return li;
     }));
-    const candidates = (Array.isArray(analysis?.candidates) ? analysis.candidates : [])
-      .filter(item => item && typeof item.label === 'string' && typeof item.evidence === 'string' &&
-        Number.isFinite(item.score) && item.score >= 0 && item.score <= 100)
-      .slice().sort((a,b)=>b.score-a.score).slice(0,5);
-    $('analysis-candidates').hidden = !candidates.length;
-    $('candidate-list').replaceChildren(...candidates.map(item => {
-      const li = document.createElement('li');
-      const heading = document.createElement('strong');
-      heading.textContent = `${item.label} · 적합도 ${Math.round(item.score)} / 100`;
-      const evidence = document.createElement('p');
-      evidence.textContent = item.evidence;
-      li.append(heading,evidence);
-      return li;
-    }));
-    $('analysis-caveat').textContent = analysis?.caveat || '';
+    $('analyze-button').hidden = analysisState !== 'error';
     $('analyze-button').disabled = analysisBusy || !motionReport?.sufficient;
-    $('analyze-button').textContent = analysisBusy ? '움직임을 읽고 있어요…' : ai ? 'AI로 다시 해석하기 ↗' : 'AI로 움직임 해석하기 ↗';
-    $('analyze-button').setAttribute('aria-busy', String(analysisBusy));
-    if (!intendedFeeling && !detail) {
-      $('comparison-verdict').textContent = '내 의도를 먼저 남겨보세요.';
-      $('comparison-explanation').textContent = '해석과 내 의도를 비교해보세요. 같은 움직임의 어떤 부분을 서로 다르게 읽었을까요?';
-    } else if (ai) {
-      $('comparison-verdict').textContent = '내가 담은 느낌과 읽힌 인상';
-      $('comparison-explanation').textContent = '나는 ‘' + (intendedFeeling || detail) + '’을 담았고, ' +
-        'AI는 ‘' + analysis.impression +
-        '’을 보여줍니다. 움직임에서 읽은 근거와 내 의도 사이에 어떤 차이가 있나요?';
-    } else {
-      $('comparison-verdict').textContent = '내 의도를 남겼어요.';
-      $('comparison-explanation').textContent = 'AI 해석이 도착하면 내 표현과 나란히 비교할 수 있어요.';
-    }
+    $('analyze-button').textContent = '해석 다시 시도하기 ↗';
     updateLogUI();
   }
 
   function updateLogUI() {
-    $('video-status').textContent = videoMessage;
     $('video-capture-status').textContent = videoMessage;
-    $('video-capture-status').hidden = !videoOptIn || view !== 'drawing';
-    $('log-save-status').textContent = logMessage;
-    $('save-log').disabled = videoPending || analysisBusy || view !== 'result';
-    $('save-log').textContent = videoPending ? '영상 마무리 중…'
-      : logSavedId === captureId && captureId ? '저장한 비공개 로그 보기 ↗' : '비공개 로그에 저장 ↗';
+    $('video-capture-status').hidden = view !== 'drawing';
+    $('auto-save-status').textContent = autoSaveMessage || '기록한 영상과 결과를 이 기기에 먼저 자동 보관합니다.';
+    $('log-connect').hidden = privateLogs?.authenticated === true || !['queued','connecting','error'].includes(autoSaveKind);
   }
 
   function resetCaptureLog() {
     videoRecorder?.abort();
     videoRecorder = null;
-    videoOptIn = false;
+    videoOptIn = true;
     videoAttempted = false;
     videoPending = false;
     recordedVideo = null;
-    videoMessage = '영상 보관을 선택하지 않았어요. 의도와 AI 결과만 저장할 수 있습니다.';
+    videoMessage = '기록을 시작하면 소리 없이 영상도 자동 보관합니다.';
     captureId = window.crypto?.randomUUID?.() || globalThis.crypto?.randomUUID?.() || '';
     captureCreatedAt = new Date().toISOString();
-    logPopup = null;
-    logPending = null;
-    logSavedId = '';
-    logMessage = '아직 저장되지 않았어요. 비공개 로그에 저장을 눌러 이번 움직임을 보관해 주세요.';
+    captureRevision = 0;
+    clearTimeout(autoSaveTimer);
+    similarityController?.abort(); similarityVersion++; similarityResult=null; similarityMessage="";
   }
 
   function resumeVideoCapture() {
@@ -386,43 +370,53 @@
     updateLogUI();
   }
 
-  function logURL(capture = false) {
-    const configured = (window.JANSANG_CONFIG?.logBase || '').trim().replace(/\/+$/, '');
-    if (!configured) throw new Error('비공개 로그 서버가 아직 연결되지 않았어요.');
-    const url = new URL(configured + '/logs/');
-    if (url.protocol !== 'https:') throw new Error('비공개 로그는 HTTPS 주소에서 열어야 합니다.');
-    if (capture) { url.searchParams.set('capture','1'); url.searchParams.set('save','1'); }
-    return url;
+  function setupAutoStorage() {
+    const base=window.JANSANG_CONFIG?.logBase;
+    if(!base||!window.GhostingPrivateLogs){autoSaveMessage='자동 보관을 준비하지 못했어요. 새로고침해 주세요.';return;}
+    privateLogs=new window.GhostingPrivateLogs.Client({base,win:window,onState(state){autoSaveMessage=state.message;autoSaveKind=state.kind;updateLogUI();}});
+    $('log-link').href=new URL('/logs/',base).href;$('log-link').hidden=false;
+    $('log-link').addEventListener('click',event=>{event.preventDefault();privateLogs.prepare();});
+    $('log-connect').addEventListener('click',()=>privateLogs.prepare());
   }
 
-  function savePrivateLog() {
-    if (view !== 'result' || videoPending || analysisBusy) return;
-    try {
-      if (!captureId) throw new Error('기록 번호를 만들지 못했어요. 최신 브라우저에서 다시 기록해 주세요.');
-      const alreadySaved = logSavedId === captureId;
-      const url = logURL(!alreadySaved);
-      if (alreadySaved) { window.open(url.href, '_blank', 'noopener,noreferrer'); return; }
-      const record = {
-        id:captureId, createdAt:captureCreatedAt, source:captureSource,
-        handTarget:captureSource === 'hand' ? handTarget : null, durationMs:duration,
-        intention:intendedFeeling, details:$('intent-detail').value,
-        analysis:analysis ? JSON.parse(JSON.stringify(analysis)) : null,
-        analysisError:analysisState === 'error' ? {code:analysisErrorCode,message:analysisMessage} : null,
-        metrics:{...(motionReport?.payload?.metrics || {})}
-      };
-      logOrigin = url.origin;
-      logPending = {record,video:recordedVideo};
-      logPopup = window.open(url.href, '_blank');
-      if (!logPopup) throw new Error('로그 창이 차단됐어요. 팝업을 허용한 뒤 다시 저장해 주세요.');
-      logMessage = '아직 저장 전이에요. 로그 창에서 로그인하면 바로 저장됩니다. 저장 완료 표시까지 두 창을 열어두세요.';
-    } catch (error) {
-      logMessage = error.message;
-      logPending = null;
-    }
-    updateLogUI();
+  function queueAutoSave(delay=0) {
+    clearTimeout(autoSaveTimer);autoSaveTimer=0;
+    if(view!=='result'||!captureId||videoPending||!privateLogs)return;
+    const id=takeId;
+    const save=()=>{
+      autoSaveTimer=0;
+      if(id!==takeId||view!=='result')return;
+      const record={id:captureId,revision:++captureRevision,createdAt:captureCreatedAt,source:captureSource,
+        handTarget:captureSource==='hand'?handTarget:null,durationMs:duration,intention:intendedFeeling,
+        details:$('intent-detail').value,analysis:analysis?JSON.parse(JSON.stringify(analysis)):null,
+        analysisError:analysisState==='error'?{code:analysisErrorCode,message:analysisMessage}:null,
+        metrics:{...(motionReport?.payload?.metrics||{})},similarity:similarityResult?{method:similarityResult.method,model:similarityResult.model,rankingScope:'movement-candidates',queryCoverage:similarityResult.queryCoverage,missingTokens:similarityResult.missingTokens,matchedTokens:similarityResult.matchedTokens,limitations:similarityResult.limitations,results:similarityResult.results.map(item=>({label:item.label,similarity:item.similarity,rawCosine:item.rawCosine,evidence:item.evidence||''}))}:null};
+      privateLogs.enqueue(record,recordedVideo).catch(error=>{autoSaveMessage='자동 보관 실패: '+error.message;updateLogUI();});
+    };
+    // Persist each edit immediately; the log client coalesces online writes at eight-second intervals.
+    save();
+  }
+
+  async function updateSimilarity() {
+    similarityController?.abort();const version=++similarityVersion;
+    similarityResult=null;
+    const query=[intendedFeeling,$('intent-detail').value.trim()].filter(Boolean).join(' ');
+    const candidates=analysis?.candidates;
+    if(!query||!Array.isArray(candidates)||!candidates.length){similarityMessage='';updateComparison();queueAutoSave(600);return;}
+    if(!window.GhostingSemantic){similarityMessage='한국어 유사도 모델을 준비하지 못했어요.';updateComparison();queueAutoSave(600);return;}
+    const controller=new AbortController();similarityController=controller;
+    similarityMessage='한국어 표현의 의미를 비교하고 있어요. 처음에는 단어 모델을 불러옵니다.';updateComparison();
+    try{
+      const result=await window.GhostingSemantic.rank(query,candidates,{limit:5,signal:controller.signal});
+      if(version!==similarityVersion||controller.signal.aborted)return;
+      similarityResult=result;
+      similarityMessage=result.results.length?(result.queryCoverage<1?'일부 단어가 사전에 없어 확인되는 단어로 비교했습니다. ':'')+'단어 벡터의 코사인 유사도 · 감정의 정확도나 확률이 아닙니다.':'이 표현의 단어 벡터를 찾지 못했어요. 다른 말로 남겨주세요.';
+    }catch(error){if(version!==similarityVersion||controller.signal.aborted)return;similarityMessage='유사도를 계산하지 못했어요. '+error.message;}
+    finally{if(version===similarityVersion){updateComparison();queueAutoSave(400);}}
   }
 
   function analysisErrorTitle(code) {
+    if (code.startsWith('MOTIONGPT_') || ['MODEL_HASH_MISMATCH','SOURCE_HASH_MISMATCH'].includes(code)) return '전신 해석 모델을 확인해 주세요';
     if (code === 'AI_TIMEOUT') return '분석 시간이 초과됐어요';
     if (['RATE_LIMITED','PROVIDER_QUOTA'].includes(code)) return '분석 요청이 많아요';
     if (code === 'CANCELLED') return 'AI 해석을 취소했어요';
@@ -453,15 +447,16 @@
       $('intent-short').value = characters.slice(0, 5).join('');
     }
     intendedFeeling = $('intent-short').value.trim();
-    document.querySelectorAll('.feelings button').forEach(button =>
-      button.setAttribute('aria-pressed', String(button.dataset.feeling === intendedFeeling)));
     updateComparison();
+    queueAutoSave(600);
+    updateSimilarity();
     if (characters.length > 5) {
       $('feeling-note').textContent = '다섯 글자까지 담고, 원래 표현 전체는 아래 메모에 함께 보관했어요.';
     }
   }
 
   function clearAnalysis() {
+    if(view==='result')queueAutoSave();
     takeId++;
     analysisController?.abort();
     analysisController = null;
@@ -487,7 +482,8 @@
         : 'AI 해석을 요청하면 움직임에서 전해지는 인상을 볼 수 있어요.')
       : '분석할 움직임이 짧거나 인식한 관절이 부족합니다. 1초 이상 움직임을 남겨주세요.';
     updateComparison();
-    if ($('ai-consent').checked && motionReport.sufficient && !isExample) requestAI();
+    queueAutoSave();
+    if (window.JANSANG_CONFIG?.autoAnalyze !== false && motionReport.sufficient) requestAI();
   }
 
   function apiBase() {
@@ -525,7 +521,10 @@
     const controller = new AbortController();
     analysisController = controller;
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
+    const localBody = ['localhost','127.0.0.1'].includes(location.hostname) && captureSource === 'webcam';
+    const deadline = localBody ? 180000 : 30000;
+    $('analysis-dialog-copy').textContent = localBody ? '전신 동작을 CPU로 해석합니다. 최대 3분 동안 기다릴 수 있어요.' : '움직임을 해석하고 있어요. 최대 30초 동안 기다립니다.';
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, deadline);
     analysisBusy = true;
     analysis = null;
     analysisState = 'busy';
@@ -559,7 +558,9 @@
       analysis = result;
       analysisState = 'ready';
       analysisErrorCode = '';
-      analysisMessage = (isExample ? '합성 예시 움직임에 대한 ' : '') + 'Gemini가 움직임 정보만 보고 생성한 해석입니다.';
+      analysisMessage = '';
+      if(data.motionCaption)analysis.motionCaption=data.motionCaption;
+      updateSimilarity();
       announce('AI 해석이 도착했습니다. 내 의도와 비교해보세요.');
     } catch (error) {
       if (id !== takeId || analysisController !== controller) return;
@@ -567,7 +568,7 @@
       analysisErrorCode = error.name === 'AbortError' ? (timedOut ? 'AI_TIMEOUT' : 'CANCELLED')
         : typeof error.code === 'string' ? error.code : 'NETWORK_ERROR';
       analysisMessage = error.name === 'AbortError'
-        ? (timedOut ? '30초 안에 AI 응답을 받지 못해 요청을 멈췄어요. 잔상은 남아 있으니 다시 해석할 수 있습니다.' : 'AI 해석을 취소했어요. 잔상은 그대로 남아 있습니다.')
+        ? (timedOut ? (localBody ? 'CPU 해석 제한 시간이 지났어요. 기록은 보관하고 있습니다.' : '30초 안에 응답이 도착하지 않았어요. 기록은 보관하고 있습니다.') : 'AI 해석을 취소했어요. 잔상은 그대로 남아 있습니다.')
         : analysisErrorCode === 'NETWORK_ERROR' ? 'AI 서버에 연결하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.' : error.message;
     } finally {
       clearTimeout(timeout);
@@ -576,6 +577,7 @@
         analysisController = null;
         if (analysisDialog.open) analysisDialog.close();
         updateComparison();
+        queueAutoSave();
       }
     }
   }
@@ -676,8 +678,10 @@
     if(lost) return;
     stopCamera();
     clearAnalysis();
-    videoOptIn = $('video-consent').checked;
-    if (videoOptIn) videoMessage = '기록을 시작하면 영상도 이 기기에 임시 보관합니다. 아직 온라인으로 보내지 않아요.';
+    videoOptIn = true;
+    privateLogs?.prepare();
+    window.GhostingSemantic?.load().catch(()=>{});
+    if (videoOptIn) videoMessage = '영상과 결과를 이 기기에 자동 보관하고, 개인 기록함 로그인 후 온라인에도 동기화합니다.';
     dialog.close();
     points=[];
     poseFrames=[];
@@ -700,7 +704,7 @@
     $('input-hand').setAttribute('aria-pressed', String(next === 'hand'));
     $('input-webcam').setAttribute('aria-pressed', String(next === 'webcam'));
     $('input-help').textContent = next === 'webcam'
-      ? '카메라 허용 후 자세를 잡고 시작하세요. 영상 보관 여부는 직접 선택할 수 있어요.'
+      ? '어깨부터 양발까지 화면에 보이도록 자세를 잡아주세요.'
       : '양손을 함께 보여주세요. 각 손의 검지 끝 또는 손목으로 공중에 그립니다.';
     $('start').firstChild.textContent = '웹캠 준비하기 ';
   }
@@ -779,7 +783,7 @@
     refresh();
   }
 
-  function receivePose({landmarks = [], hands = [], timestamp:now}) {
+  function receivePose({landmarks = [], worldLandmarks = [], hands = [], timestamp:now}) {
     if (view !== 'drawing' || !isCameraInput()) return;
     const hand = captureSource === 'hand';
     const jointIndices = hand ? {
@@ -844,7 +848,12 @@
     if (mode !== 'recording') return;
     const t = recordTime(now);
     if (!poseFrames.length || t > poseFrames[poseFrames.length-1].t) {
-      poseFrames.push(hand ? {t,hands:observedHands,segment:poseSegment} : {t,joints,segment:poseSegment});
+      const worldJoints={};
+      if(!hand)for(const [name,index] of Object.entries(jointIndices)){
+        const p=worldLandmarks[index];
+        if(p&&p.visibility>=.5&&[p.x,p.y,p.z].every(v=>Number.isFinite(v)&&Math.abs(v)<=20))worldJoints[name]=[p.x,p.y,p.z];
+      }
+      poseFrames.push(hand ? {t,hands:observedHands,segment:poseSegment} : {t,joints,...(Object.keys(worldJoints).length?{worldJoints}:{}),segment:poseSegment});
     }
     // Each visible hand has its own trail; missing hands never join another hand.
     const traceJoints = hand ? null : {...joints, bodyCenter:[
@@ -1058,36 +1067,11 @@
     strokeWidth=Number(event.target.value);$('width-value').textContent=strokeWidth;dirty=true;render();
   });
   $('show-grid').addEventListener('change',event=>{ $('grid').hidden=!event.target.checked; });
-  document.querySelectorAll('.feelings button').forEach(button=>button.addEventListener('click',()=>{
-    const selected=button.getAttribute('aria-pressed')==='true';
-    document.querySelectorAll('.feelings button').forEach(b=>b.setAttribute('aria-pressed','false'));
-    button.setAttribute('aria-pressed',String(!selected));
-    intendedFeeling = selected ? '' : button.dataset.feeling;
-    $('intent-short').value = intendedFeeling;
-    updateComparison();
-  }));
   $('intent-short').addEventListener('compositionstart',()=>{ intentComposing = true; });
   $('intent-short').addEventListener('compositionend',()=>{ intentComposing = false; commitIntent(); });
   $('intent-short').addEventListener('input',event=>{ if (!event.isComposing) commitIntent(); });
-  $('intent-detail').addEventListener('input',updateComparison);
+  $('intent-detail').addEventListener('input',()=>{updateComparison();queueAutoSave(600);updateSimilarity();});
   $('analyze-button').addEventListener('click',requestAI);
-  $('save-log').addEventListener('click',savePrivateLog);
-  window.addEventListener('message',event=>{
-    if (!logPopup || event.source !== logPopup || event.origin !== logOrigin || !logPending) return;
-    if (event.data?.type === 'ghosting:ready') {
-      logPopup.postMessage({type:'ghosting:capture',...logPending}, logOrigin);
-      logMessage = '로그 창으로 기록을 보내고 있어요. 저장 완료를 기다려 주세요.';
-    } else if (event.data?.type === 'ghosting:received' && event.data.id === logPending.record.id) {
-      logMessage = '로그 창에서 기록을 받았어요. 비공개 저장 중입니다.';
-    } else if (event.data?.type === 'ghosting:saved' && event.data.id === logPending.record.id) {
-      logSavedId = logPending.record.id;
-      logMessage = '비공개 로그에 저장했습니다.';
-      logPending = null;
-    } else if (event.data?.type === 'ghosting:error' && event.data.id === logPending.record.id) {
-      logMessage = '저장하지 못했어요. ' + (typeof event.data.message === 'string' ? event.data.message : '로그 창에서 다시 시도해 주세요.');
-    }
-    updateLogUI();
-  });
   $('export').addEventListener('click',()=>{
     if(lost || !points.length) return;
     render();
@@ -1126,6 +1110,7 @@
     }
   });
   window.addEventListener('pagehide',()=>{
+    queueAutoSave();
     pauseRecording();
     stopCamera();
     videoRecorder?.abort();
@@ -1169,10 +1154,7 @@
   }
   try { setupGL(); } catch(error) { console.error('WebGL initialization:',error);failGL(); }
   new ResizeObserver(resize).observe(stage);
-  try {
-    $('log-link').href = logURL().href;
-    $('log-link').hidden = false;
-  } catch (_) { /* The log server may not yet be configured. */ }
+  setupAutoStorage();
   setView('intro');refresh();openStart();
   requestAnimationFrame(frame);
 })();

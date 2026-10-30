@@ -8,13 +8,14 @@ const dist = path.join(__dirname, '..', 'dist');
 const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
 const appSource = fs.readFileSync(path.join(dist, 'app.js'), 'utf8');
 const motionSource = fs.readFileSync(path.join(dist, 'motion-analysis.js'), 'utf8');
+const {Client:PrivateLogClient}=require('../dist/private-log-client.js');
 const copy = value => JSON.parse(JSON.stringify(value));
-const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+const flush = async () => { for (let i = 0; i < 24; i++) await Promise.resolve(); };
 
 // A deliberately small event surface: rendering and camera hardware are mocked,
 // while app.js, motion measurements, event handlers and request bodies are real.
 function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, popupBlocked = false,
-  automaticAI = false, hostname = '127.0.0.1', apiBase = '', logBase = '' } = {}) {
+  automaticAI = false, hostname = '127.0.0.1', apiBase = '', logBase = '', privateStorage = false, semanticRank } = {}) {
   let now = 0;
   let animation;
   const timers = new Map();
@@ -42,7 +43,7 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
       this.events = new Map();
       this.dataset = {};
       this.children = [];
-      this.style = {};
+      this.style = {setProperty(name,value){this[name]=String(value);},getPropertyValue(name){return this[name] || '';}};
       this.hidden = /\bhidden(?:\s|=|$)/.test(attributes);
       this.checked = /\bchecked(?:\s|=|$)/.test(attributes);
       this.disabled = /\bdisabled(?:\s|=|$)/.test(attributes);
@@ -89,9 +90,7 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
   for (const [, tag, attributes, id] of html.matchAll(/<([a-z][\w:-]*)\b([^>]*\bid="([^"]+)"[^>]*)>/gi)) {
     elements.set(id, new Element(tag, attributes));
   }
-  // Most camera lifecycle tests opt out of networking. Production HTML defaults
-  // to checked; automatic-AI tests explicitly retain that setting.
-  elements.get('ai-consent').checked = automaticAI;
+  // Tests can disable automatic networking without changing the production UI.
   const feelings = [...html.matchAll(/<button\b([^>]*\bdata-feeling="([^"]+)"[^>]*)>/g)]
     .map(match => new Element('button', match[1]));
   const document = new Element();
@@ -144,7 +143,16 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
   window.devicePixelRatio = 1;
   window.scrollTo = noop;
   window.JansangPoseCamera = Camera;
-  window.JANSANG_CONFIG = { apiBase,logBase };
+  window.JANSANG_CONFIG = { apiBase,logBase,autoAnalyze:automaticAI };
+  if(semanticRank)window.GhostingSemantic={rank:semanticRank,load:async()=>{}};
+  const storedLogs=new Map(), logClients=[];
+  if(privateStorage)window.GhostingPrivateLogs={Client:class extends PrivateLogClient {
+    constructor(options){super({...options,minSyncIntervalMs:0,ackTimeoutMs:0,store:{
+      all:async()=>[...storedLogs.values()],
+      put:async draft=>storedLogs.set(draft.id,draft),
+      delete:async id=>storedLogs.delete(id)
+    }});logClients.push(this);}
+  }};
   window.crypto = {randomUUID:()=>`00000000-0000-4000-8000-${String(++captureCounter).padStart(12,'0')}`};
   window.GhostingSessionRecorder = class {
     constructor({onState}) { this.onState=onState;this.calls=[];recorders.push(this); }
@@ -196,7 +204,8 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
   vm.runInContext(appSource, context, { filename: 'app.js' });
   assert.equal(failures.length, 0, 'WebGL initialization succeeded with the mock');
   return {
-    elements, document, window, cameras, recorders, popups, lifecycle, reports, calls, timers,
+    elements, document, window, cameras, recorders, popups, lifecycle, reports, calls, timers,storedLogs,logClients,
+    async runTimers(delay){for(const [id,timer] of [...timers])if(timer.delay===delay){timers.delete(id);timer.callback();}await flush();},
     get: id => elements.get(id),
     click: id => elements.get(id).click(),
     setTime: value => { now = value; },
@@ -279,7 +288,7 @@ const aiResult = {
 };
 const ok = body => ({ ok: true, json: async () => body });
 
-test('webcam recording pauses without joining movements and keeps AI-only results pending when opted out', async () => {
+test('webcam recording pauses without joining movements while networking is disabled in the harness', async () => {
   const app = createApp();
   assert.equal(app.get('start-dialog').open, true);
   const camera = await app.startWebcam();
@@ -301,9 +310,9 @@ test('webcam recording pauses without joining movements and keeps AI-only result
   assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
   assert.equal(report.sufficient, true);
   assert.ok(report.payload.metrics.pathLength < 0.15, 'Jump during pause is not counted in traveled distance');
-  assert.equal(app.get('analysis-badge').textContent, '해석 대기');
+  assert.equal(app.get('analyze-button').hidden,true);
   assert.equal(app.get('analysis-qualities').children.length, 0);
-  assert.equal(app.get('ai-word').textContent, '해석 대기');
+  assert.equal(app.get('ai-word').textContent, '움직임을 기다려요');
   assert.equal(app.get('analysis-evidence').tagName, 'DETAILS');
   assert.equal(app.get('analysis-evidence').hidden, true);
   assert.equal(app.get('analysis-evidence').open, false, 'Movement evidence starts collapsed');
@@ -327,7 +336,7 @@ test('tracking loss also opens a new recording segment, and finishing stops came
 
 test('footwork with stationary arms records five traces and sends all 22 body joints without the visible face', async () => {
   const app = createApp({ fetchResponse: async () => ok(aiResult) });
-  app.get('ai-consent').checked = true;
+  app.window.JANSANG_CONFIG.autoAnalyze = true;
   const camera = await app.startWebcam();
   for (let i = 0; i < 21; i++) camera.emit(1000 + i * 65, footwork(i, { showFace: true }));
   await app.click('finish');
@@ -500,18 +509,18 @@ test('retrying after a camera error preserves the recorded segment and resumes o
   assert.equal(replacement.stopped, true);
 });
 
-test('synthetic example retains its source and never auto-sends even when automatic AI is checked', async () => {
-  const app = createApp();
-  app.get('ai-consent').checked = true;
-  await app.click('example');
-  assert.equal(app.reports.at(-1).report.payload.source, 'example');
-  assert.equal(app.get('analysis-badge').textContent, '합성 예시 · 해석 대기');
-  assert.equal(app.calls.length, 0);
+test('synthetic example retains its source and automatically analyzes when configured',async()=>{
+ const app=createApp({automaticAI:true,fetchResponse:async()=>ok(aiResult)});
+ await app.click('example');await flush();
+ assert.equal(app.reports.at(-1).report.payload.source,'example');
+ assert.equal(app.calls.length,1);assert.equal(app.calls[0].payload.source,'example');
+ assert.equal(app.get('ai-word').textContent,aiResult.analysis.impression);
+ assert.equal(app.recorders.length,0,'Synthetic examples do not start a camera recorder');
 });
 
 test('automatic AI sends only movement data and renders a successful interpretation beside private intent', async () => {
   const app = createApp({ fetchResponse: async () => ok(aiResult) });
-  app.get('ai-consent').checked = true;
+  app.window.JANSANG_CONFIG.autoAnalyze = true;
   const camera = await app.startWebcam();
   app.get('intent-detail').value = '개인적인 의도는 외부에 보내지 않기';
   await app.get('intent-detail').dispatch('input');
@@ -528,7 +537,8 @@ test('automatic AI sends only movement data and renders a successful interpretat
   assert.equal(payload.source, 'webcam');
   assert.equal(options.credentials, 'omit');
   assert.equal(app.get('ai-word').textContent, aiResult.analysis.impression);
-  assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+  assert.equal(app.get('analysis-status').hidden,true);
+  assert.equal(app.get('analyze-button').hidden,true);
   assert.deepEqual(app.get('analysis-qualities').children.map(tag => tag.textContent), aiResult.analysis.qualities);
   assert.equal(app.get('analysis-evidence').hidden, false);
   assert.equal(app.get('analysis-evidence').open, false, 'AI interpretation leaves supporting evidence collapsed');
@@ -540,7 +550,7 @@ test('a fresh take aborts an in-flight request and ignores its delayed success',
   let resolve;
   const response = new Promise(done => { resolve = done; });
   const app = createApp({ fetchResponse: () => response });
-  app.get('ai-consent').checked = true;
+  app.window.JANSANG_CONFIG.autoAnalyze = true;
   const camera = await app.startWebcam();
   record(camera);
   await app.click('finish');
@@ -556,8 +566,8 @@ test('a fresh take aborts an in-flight request and ignores its delayed success',
   assert.equal(app.document.body.dataset.view, 'drawing');
   resolve(ok(aiResult));
   await flush();
-  assert.equal(app.get('ai-word').textContent, '해석 대기');
-  assert.equal(app.get('analysis-badge').textContent, '해석 대기');
+  assert.equal(app.get('ai-word').textContent, '움직임을 기다려요');
+  assert.equal(app.get('analyze-button').hidden,true);
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.get('analysis-evidence').open, false);
   assert.equal(app.get('analysis-evidence').hidden, true);
@@ -568,12 +578,12 @@ test('an AI error shows guidance without presenting local measurements as an int
   const app = createApp({ fetchResponse: async () => ({
     ok: false, json: async () => ({ error: { code: 'PROVIDER_QUOTA', message: '무료 사용량 한도에 도달했습니다.' } }),
   }) });
-  app.get('ai-consent').checked = true;
+  app.window.JANSANG_CONFIG.autoAnalyze = true;
   const camera = await app.startWebcam();
   record(camera);
   await app.click('finish');
   await flush();
-  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.equal(app.get('analyze-button').hidden,false);
   assert.equal(app.get('ai-word').textContent, '분석 요청이 많아요');
   assert.equal(app.get('analysis-status').dataset.code, 'PROVIDER_QUOTA');
   assert.equal(app.get('analysis-qualities').children.length, 0);
@@ -684,7 +694,7 @@ test('switching from hand input to full body stops the old camera and ignores st
 
 test('hand AI request identifies the selected point without sending private intent or body coordinates', async () => {
   const app = createApp({ fetchResponse: async () => ok(aiResult) });
-  app.get('ai-consent').checked = true;
+  app.window.JANSANG_CONFIG.autoAnalyze = true;
   const camera = await app.startHand();
   app.get('intent-detail').value = '숨겨 둘 개인적인 표현';
   recordHand(camera);
@@ -696,7 +706,8 @@ test('hand AI request identifies the selected point without sending private inte
   assert.equal(payload.handTarget, 'indexTip');
   assert.ok(payload.samples.every(frame => frame.hands[0].joints.indexTip && frame.hands[0].joints.wrist && !frame.hands[0].joints.leftShoulder));
   assert.ok(!options.body.includes('개인적인'));
-  assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+  assert.equal(app.get('analysis-status').hidden,true);
+  assert.equal(app.get('analyze-button').hidden,true);
 });
 
 function twoHands(index = 0) {
@@ -707,7 +718,7 @@ function twoHands(index = 0) {
 
 test('both hands produce separate trails regardless of detector order and both reach AI', async () => {
   const app = createApp({ fetchResponse: async () => ok(aiResult) });
-  app.get('ai-consent').checked = true;
+  app.window.JANSANG_CONFIG.autoAnalyze = true;
   const camera = await app.startHand();
   for (let i = 0; i < 21; i++) {
     const hands = twoHands(i);
@@ -778,16 +789,16 @@ test('both hidden hands pause the shared clock; camera failure clears the live c
   assert.equal(report.payload.metrics.pathLength, 0, 'Stationary wrists remain stationary across the hidden gap');
 });
 
-test('Ghosting defaults to disclosed automatic AI and removes every monochrome UI binding', () => {
-  const checkbox = html.match(/<input\b[^>]*id="ai-consent"[^>]*>/)?.[0];
-  assert.match(checkbox, /\bchecked\b/);
-  assert.match(html, /<title>잔상:Ghosting - 움직임을 남기는 방법<\/title>/);
-  assert.match(html, /<strong class="brand-title">잔상<\/strong><small>TRACES OF MOVEMENT<\/small>/);
-  assert.doesNotMatch(html, /MOVEMENT READING|color-mono|result-color|mono-note|한 가지 색|단색/);
-  assert.doesNotMatch(appSource, /motionReport\.local|analysisKind|colorMode|setColor|result-color|mono-note/);
-  const app = createApp();
-  assert.equal(app.get('width').value, '3', 'Thickness setting remains');
-  assert.ok(app.get('color-scale'), 'Speed color explanation remains');
+test('start UI offers only input modes and discloses automatic private recording',()=>{
+ assert.doesNotMatch(html,/id="(?:ai-consent|video-consent|intent-limit|analysis-badge|save-log)"|data-feeling=/);
+ assert.match(html,/<title>잔상:Ghosting - 움직임을 남기는 방법<\/title>/);
+ assert.match(html,/<strong class="brand-title">잔상<\/strong><small>TRACES OF MOVEMENT<\/small>/);
+ assert.match(html,/소리 없는 영상과 분석 기록을 비공개로 자동 보관/);
+ assert.doesNotMatch(html,/MOVEMENT READING|color-mono|result-color|mono-note|한 가지 색|단색/);
+ assert.doesNotMatch(appSource,/motionReport\.local|analysisKind|colorMode|setColor|result-color|mono-note/);
+ const app=createApp();assert.equal(app.get('width').value,'3');assert.ok(app.get('color-scale'));
+ assert.equal(app.get('analysis-candidates').tagName,'SECTION');
+ assert.ok(app.get('intent-examples'));assert.ok(app.get('auto-save-status'));
 });
 
 test('automatic AI opens the progress modal and closes immediately on an early successful response', async () => {
@@ -798,7 +809,7 @@ test('automatic AI opens the progress modal and closes immediately on an early s
   recordHand(camera);
   await app.click('finish');
   assert.equal(app.get('analysis-dialog').open, true);
-  assert.equal(app.get('analysis-badge').textContent, 'AI 해석 중');
+  assert.equal(app.get('ai-word').textContent,'움직임을 읽는 중');
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.calls.length, 1);
   assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [30000]);
@@ -822,7 +833,7 @@ test('thirty-second deadline closes a stalled fetch and ignores its late respons
   await flush();
   assert.equal(app.calls[0].options.signal.aborted, true);
   assert.equal(app.get('analysis-dialog').open, false);
-  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.equal(app.get('analyze-button').hidden,false);
   assert.match(app.get('analysis-status').textContent, /30초/);
   assert.equal(app.get('analysis-status').dataset.code, 'AI_TIMEOUT');
   assert.equal(app.get('analysis-qualities').children.length, 0);
@@ -849,7 +860,7 @@ test('the same deadline covers a stalled response body rather than restarting af
   assert.match(app.get('analysis-status').textContent, /30초/);
   resolveBody(aiResult);
   await flush();
-  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.equal(app.get('analyze-button').hidden,false);
 });
 
 test('progress dialog cancellation preserves the recording and prevents late AI replacement', async () => {
@@ -881,7 +892,7 @@ test('an unavailable public API remains a plain error without fake impressions o
   await flush();
   assert.equal(app.calls.length, 0);
   assert.equal(app.get('analysis-dialog').open, false);
-  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.equal(app.get('analyze-button').hidden,false);
   assert.match(app.get('analysis-status').textContent, /서버가 아직 연결되지/);
   assert.equal(app.get('analysis-status').dataset.code, 'NOT_CONFIGURED');
   assert.equal(app.get('ai-word').textContent, 'AI 연결이 필요해요');
@@ -902,7 +913,8 @@ test('the public site sends AI requests to its configured HTTPS Worker endpoint'
   assert.equal(app.calls.length, 1);
   assert.equal(app.calls[0].url, 'https://ghosting-test.example.workers.dev/api/analyze');
   assert.equal(app.calls[0].options.credentials, 'omit');
-  assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+  assert.equal(app.get('analysis-status').hidden,true);
+  assert.equal(app.get('analyze-button').hidden,true);
 });
 
 test('all local hostnames retain their same-origin API after a public Worker is configured', async () => {
@@ -918,7 +930,8 @@ test('all local hostnames retain their same-origin API after a public Worker is 
     await flush();
     assert.equal(app.calls.length, 1);
     assert.equal(app.calls[0].url, '/api/analyze', `${hostname} must not call the public Worker`);
-    assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+    assert.equal(app.get('analysis-status').hidden,true);
+  assert.equal(app.get('analyze-button').hidden,true);
   }
 });
 
@@ -932,7 +945,7 @@ test('the public site rejects an insecure configured API without sending movemen
   await flush();
   assert.equal(app.calls.length, 0);
   assert.equal(app.get('analysis-dialog').open, false);
-  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.equal(app.get('analyze-button').hidden,false);
   assert.match(app.get('analysis-status').textContent, /HTTPS/);
   assert.equal(app.get('analysis-qualities').children.length, 0);
 });
@@ -985,31 +998,17 @@ test('Korean IME composition is not truncated until committed and its complete o
   assert.equal(app.get('intent-word').textContent, '가나다라마');
 });
 
-test('private intention and actual AI remain side by side with no expression score or similarity module', async () => {
-  const result = copy(aiResult);
-  result.analysis.qualities = ['유연한'];
-  const app = createApp({ fetchResponse:async () => ok(result) });
-  await app.click('example');
-  app.get('intent-short').value = '유연한';
-  app.get('intent-detail').value = '절대 보내지 않을 내 사적인 생각';
-  await app.get('intent-short').dispatch('input');
-  assert.equal(app.get('intent-word').textContent, '유연한');
-  assert.equal(app.get('ai-word').textContent, '해석 대기');
-  await app.click('analyze-button');
-  await flush();
-  assert.equal(app.get('intent-word').textContent, '유연한');
-  assert.equal(app.get('ai-word').textContent, result.analysis.impression);
-  assert.deepEqual(app.get('analysis-qualities').children.map(tag => tag.textContent), result.analysis.qualities);
-  assert.ok(!app.calls[0].options.body.includes('유연한'));
-  assert.ok(!app.calls[0].options.body.includes('사적인'));
-  assert.equal(app.get('comparison-score'), undefined);
-  assert.equal(app.window.GhostingSimilarity, undefined);
-  assert.doesNotMatch(html, /similarity|표현 유사도|comparison-score/i);
-  assert.doesNotMatch(appSource, /Similarity|comparison-score|similarity-score/);
-  const styles = fs.readFileSync(path.join(dist, 'styles.css'), 'utf8');
-  assert.doesNotMatch(styles, /\.similarity/);
-  assert.equal(fs.existsSync(path.join(dist, 'feeling-similarity.js')), false);
-  assert.equal(fs.existsSync(path.join(__dirname, 'feeling-similarity.test.cjs')), false);
+test('private intention and AI remain side by side while semantic comparison stays on the device',async()=>{
+ const result=copy(aiResult);result.analysis.qualities=['유연한'];
+ const app=createApp({fetchResponse:async()=>ok(result)});
+ await app.click('example');app.get('intent-short').value='유연한';app.get('intent-detail').value='절대 보내지 않을 내 사적인 생각';
+ await app.get('intent-short').dispatch('input');assert.equal(app.get('intent-word').textContent,'유연한');
+ await app.click('analyze-button');await flush();
+ assert.equal(app.get('ai-word').textContent,result.analysis.impression);
+ assert.deepEqual(app.get('analysis-qualities').children.map(tag=>tag.textContent),result.analysis.qualities);
+ assert.ok(!app.calls[0].options.body.includes('사적인'));assert.ok(!app.calls[0].options.body.includes('유연한'));
+ assert.equal(app.get('comparison-score'),undefined);assert.equal(app.get('comparison-verdict'),undefined);
+ assert.match(html,/id="similarity-status"/);assert.ok(fs.existsSync(path.join(dist,'semantic-similarity.js')));
 });
 
 test('malformed AI qualities produce a specific response-format failure without a fake interpretation', async () => {
@@ -1020,7 +1019,7 @@ test('malformed AI qualities produce a specific response-format failure without 
   recordHand(camera);
   await app.click('finish');
   await flush();
-  assert.equal(app.get('analysis-badge').textContent, '해석 불가');
+  assert.equal(app.get('analyze-button').hidden,false);
   assert.equal(app.get('analysis-qualities').children.length, 0);
   assert.equal(app.get('ai-word').textContent, 'AI 응답을 다시 받아야 해요');
   assert.equal(app.get('analysis-status').dataset.code, 'INVALID_ANALYSIS');
@@ -1096,7 +1095,8 @@ test('cancelling then retrying keeps a successful new response when the earlier 
   assert.equal(app.get('analysis-status').dataset.code, '', 'A successful retry clears previous error metadata');
   rejectOld(new TypeError('Old transport failed later'));
   await flush();
-  assert.equal(app.get('analysis-badge').textContent, 'Gemini 해석');
+  assert.equal(app.get('analysis-status').hidden,true);
+  assert.equal(app.get('analyze-button').hidden,true);
   assert.equal(app.get('ai-word').textContent, aiResult.analysis.impression);
   assert.equal(app.get('analysis-status').dataset.code, '');
   assert.equal(app.get('analysis-dialog').open, false);
@@ -1106,211 +1106,138 @@ test('cancelling then retrying keeps a successful new response when the earlier 
 
 const logBase = 'https://ghosting-logbook.jansang.workers.dev';
 
-test('video is opt-in and private log data leaves only on an authorized popup handshake after a save click', async () => {
-  const app = createApp({logBase,automaticAI:true,fetchResponse:async()=>ok(aiResult)});
-  assert.equal(app.get('video-consent').checked,false);
-  assert.equal(app.get('log-link').href,logBase+'/logs/');
-  const camera = await app.startHand();
-  recordHand(camera);
-  await app.click('finish');
-  await flush();
-  app.get('intent-short').value='유연한';
-  app.get('intent-detail').value='내 비공개 기록';
-  await app.get('intent-short').dispatch('input');
-  assert.equal(app.recorders.length,0,'No recording without opt-in');
-  assert.equal(app.popups.length,0,'Finishing or AI interpretation does not upload a log');
-  assert.ok(!app.calls[0].options.body.includes('비공개'));
-  await app.click('save-log');
-  const popup = app.popups[0];
-  assert.equal(popup.url,logBase+'/logs/?capture=1&save=1');
-  assert.equal(popup.sent.length,0,'Wait for the actual log page to announce readiness');
-  await app.window.dispatch('message',{source:popup,origin:'https://wrong.example',data:{type:'ghosting:ready'}});
-  await app.window.dispatch('message',{source:{},origin:logBase,data:{type:'ghosting:ready'}});
-  assert.equal(popup.sent.length,0);
-  await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:ready'}});
-  assert.equal(popup.sent.length,1);
-  const {data,origin} = popup.sent[0];
-  assert.equal(origin,logBase);
-  assert.equal(data.type,'ghosting:capture');
-  assert.equal(data.video,null);
-  assert.match(data.record.id,/^[0-9a-f-]{36}$/);
-  assert.equal(data.record.intention,'유연한');
-  assert.equal(data.record.details,'내 비공개 기록');
-  assert.equal(data.record.analysis.impression,aiResult.analysis.impression);
-  assert.equal(data.record.source,'hand');
-  assert.equal(data.record.handTarget,'indexTip');
-  assert.equal(data.record.durationMs,1300);
-  assert.ok(data.record.metrics.meanSpeed > 0);
-  await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:ready'}});
-  assert.equal(popup.sent.length,2,'A refreshed log page can receive the same pending record again');
-  assert.equal(popup.sent[1].data.record.id,data.record.id,'Resends keep the idempotent record ID');
-  await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:received',id:data.record.id}});
-  assert.match(app.get('log-save-status').textContent,/받았어요/);
-  await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:saved',id:'other-record'}});
-  assert.doesNotMatch(app.get('log-save-status').textContent,/저장했습니다/);
-  await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:saved',id:data.record.id}});
-  assert.match(app.get('log-save-status').textContent,/저장했습니다/);
-  await app.click('save-log');
-  assert.equal(app.popups[1].url,logBase+'/logs/');
-  assert.equal(app.popups[1].sent.length,0,'Opening an already saved record never uploads it again');
+test('video and results are automatically queued locally and sent only to the authenticated log window',async()=>{
+ const app=createApp({logBase,privateStorage:true,automaticAI:true,fetchResponse:async()=>ok(aiResult)});
+ const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
+ assert.equal(app.recorders.length,1);assert.equal(app.popups.length,1);
+ assert.match(app.popups[0].url,/capture=1&save=1&auto=1/);
+ app.get('intent-short').value='유연한';app.get('intent-detail').value='내 비공개 기록';
+ await app.get('intent-short').dispatch('input');await app.runTimers(600);await flush();
+ const stored=[...app.storedLogs.values()][0];assert.ok(stored.video.size>0);
+ assert.equal(stored.record.intention,'유연한');assert.equal(stored.record.details,'내 비공개 기록');
+ assert.equal(stored.record.analysis.impression,aiResult.analysis.impression);
+ assert.ok(!app.calls[0].options.body.includes('비공개'));
+ const popup=app.popups[0];assert.equal(popup.sent.length,0);
+ await app.window.dispatch('message',{source:popup,origin:'https://wrong.example',data:{type:'ghosting:ready'}});await flush();assert.equal(popup.sent.length,0);
+ await app.window.dispatch('message',{source:{},origin:logBase,data:{type:'ghosting:ready'}});await flush();assert.equal(popup.sent.length,0);
+ await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:ready'}});await flush();
+ assert.equal(popup.sent.length,1);assert.equal(popup.sent[0].origin,logBase);assert.ok(popup.sent[0].data.video.size>0);
+ assert.equal(popup.sent[0].data.record.source,'hand');assert.equal(popup.sent[0].data.record.handTarget,'indexTip');
+ assert.equal(popup.sent[0].data.record.durationMs,1300);
 });
 
-test('opted-in video follows tracked and paused intervals and finishes before the source camera stops', async () => {
-  const app = createApp({logBase});
-  app.get('video-consent').checked=true;
-  const camera = await app.startHand();
-  assert.equal(app.recorders.length,0,'Preparing or arming the camera is not a recording interval');
-  recordHand(camera);
-  const recorder = app.recorders[0];
-  assert.equal(recorder.stream,app.get('camera-video').srcObject,'Use the existing permitted stream');
-  camera.emitHands(2400,[]);
-  assert.equal(recorder.calls.at(-1),'pause');
-  recordHand(camera,3000,5);
-  assert.equal(recorder.calls.filter(call=>call==='resume').length,1);
-  await app.click('pause');
-  assert.equal(recorder.calls.at(-1),'pause');
-  await app.click('pause');
-  assert.equal(recorder.calls.at(-1),'pause','Resuming the UI still waits for a tracked hand');
-  recordHand(camera,4000,5);
-  assert.equal(recorder.calls.at(-1),'resume');
-  app.lifecycle.length=0;
-  await app.click('finish');
-  assert.deepEqual(app.lifecycle,['video:stop','video:ready','camera:stop']);
-  assert.equal(app.get('video-status').textContent,'Mock video ready');
-  await app.click('save-log');
-  const popup=app.popups[0];
-  await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:ready'}});
-  assert.equal(popup.sent[0].data.video.type,'video/webm');
-  assert.ok(popup.sent[0].data.video.size>0);
-  assert.equal(app.calls.length,0,'Video does not go to the analysis API');
+test('automatic video follows tracked pauses and finishes before the source camera stops',async()=>{
+ const app=createApp({logBase,privateStorage:true});const camera=await app.startHand();
+ assert.equal(app.recorders.length,0);recordHand(camera);const recorder=app.recorders[0];
+ assert.equal(recorder.stream,app.get('camera-video').srcObject);
+ camera.emitHands(2400,[]);assert.equal(recorder.calls.at(-1),'pause');
+ recordHand(camera,3000,5);assert.equal(recorder.calls.filter(call=>call==='resume').length,1);
+ await app.click('pause');assert.equal(recorder.calls.at(-1),'pause');await app.click('pause');assert.equal(recorder.calls.at(-1),'pause');
+ recordHand(camera,4000,5);assert.equal(recorder.calls.at(-1),'resume');app.lifecycle.length=0;
+ await app.click('finish');await flush();assert.deepEqual(app.lifecycle,['video:stop','video:ready','camera:stop']);
+ assert.equal(app.get('video-capture-status').textContent,'Mock video ready');
+ assert.ok([...app.storedLogs.values()][0].video.size>0);assert.equal(app.calls.length,0);
 });
 
-test('camera failure discards the incomplete video but preserves the movement and log metadata', async () => {
-  const app = createApp({logBase});
-  app.get('video-consent').checked=true;
-  const camera=await app.startHand();
-  recordHand(camera);
-  camera.options.onStatus({kind:'error',message:'Camera disconnected'});
-  assert.equal(app.recorders[0].calls.at(-1),'abort');
-  await app.click('finish');
-  assert.match(app.get('video-status').textContent,/연결이 끊겨.*보관하지 못/);
-  assert.equal(app.reports.at(-1).input.points.length,21);
-  await app.click('save-log');
-  const popup=app.popups[0];
-  await app.window.dispatch('message',{source:popup,origin:logBase,data:{type:'ghosting:ready'}});
-  assert.equal(popup.sent[0].data.video,null);
-  assert.equal(popup.sent[0].data.record.source,'hand');
+test('camera failure discards incomplete video but automatically keeps movement and metadata',async()=>{
+ const app=createApp({logBase,privateStorage:true});const camera=await app.startHand();recordHand(camera);
+ camera.options.onStatus({kind:'error',message:'Camera disconnected'});assert.equal(app.recorders[0].calls.at(-1),'abort');
+ await app.click('finish');await flush();
+ assert.match(app.get('video-capture-status').textContent,/연결이 끊겨.*보관하지 못/);
+ assert.equal(app.reports.at(-1).input.points.length,21);
+ const stored=[...app.storedLogs.values()][0];assert.equal(stored.video,null);assert.equal(stored.record.source,'hand');
 });
 
-test('unsupported video remains an explicit data-only log and blocked popups do not send data', async () => {
-  const app = createApp({logBase,popupBlocked:true,recorderStart(recorder) {
-    recorder.onState({kind:'unsupported',message:'이 브라우저는 영상 보관을 지원하지 않아요.'});
-    return false;
-  }});
-  app.get('video-consent').checked=true;
-  const camera=await app.startHand();
-  recordHand(camera);
-  await app.click('finish');
-  assert.match(app.get('video-status').textContent,/지원하지 않아요/);
-  assert.equal(app.recorders[0].calls.includes('stop'),false);
-  await app.click('save-log');
-  assert.match(app.get('log-save-status').textContent,/팝업을 허용/);
-  assert.equal(app.popups.length,0);
-  assert.equal(app.calls.length,0);
+test('unsupported video and a blocked login popup still retain the data-only recording locally',async()=>{
+ const app=createApp({logBase,privateStorage:true,popupBlocked:true,recorderStart(recorder){recorder.onState({kind:'unsupported',message:'이 브라우저는 영상 보관을 지원하지 않아요.'});return false;}});
+ const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
+ assert.match(app.get('video-capture-status').textContent,/지원하지 않아요/);assert.equal(app.recorders[0].calls.includes('stop'),false);
+ assert.equal(app.popups.length,0);assert.equal(app.calls.length,0);assert.equal(app.storedLogs.size,1);
+ assert.equal([...app.storedLogs.values()][0].video,null);assert.match(app.get('auto-save-status').textContent,/기기에 자동 보관/);
 });
 
-test('a cancelled take cannot publish a late video result or transfer it to an old popup', async () => {
-  let resolveStop;
-  const app=createApp({logBase,recorderStop:()=>new Promise(resolve=>{resolveStop=resolve;})});
-  app.get('video-consent').checked=true;
-  const camera=await app.startHand();
-  recordHand(camera);
-  const finishing=app.click('finish');
-  await flush();
-  assert.equal(app.get('finish').disabled,true);
-  assert.equal(app.get('save-log').disabled,true);
-  await app.click('camera-cancel');
-  assert.equal(app.recorders[0].calls.at(-1),'abort');
-  resolveStop(new Blob(['late-camera-video'],{type:'video/webm'}));
-  await finishing;
-  await flush();
-  assert.equal(app.document.body.dataset.view,'intro');
-  assert.equal(app.get('result-dialog').open,false);
-  assert.equal(app.reports.length,0,'Late completion does not create an analysis for a cancelled take');
-  assert.equal(app.popups.length,0);
+test('a cancelled take cannot publish a late video result or enqueue a recording',async()=>{
+ let resolveStop;const app=createApp({logBase,privateStorage:true,recorderStop:()=>new Promise(resolve=>{resolveStop=resolve;})});
+ const camera=await app.startHand();recordHand(camera);const finishing=app.click('finish');await flush();
+ assert.equal(app.get('finish').disabled,true);await app.click('camera-cancel');assert.equal(app.recorders[0].calls.at(-1),'abort');
+ resolveStop(new Blob(['late-camera-video'],{type:'video/webm'}));await finishing;await flush();
+ assert.equal(app.document.body.dataset.view,'intro');assert.equal(app.get('result-dialog').open,false);
+ assert.equal(app.reports.length,0);assert.equal(app.storedLogs.size,0);
 });
 
-test('retrying a private log transfer keeps its record ID while a new take receives a new one', async () => {
-  const app=createApp({logBase});
-  const camera=await app.startHand();
-  recordHand(camera);
-  await app.click('finish');
-  await app.click('save-log');
-  const first=app.popups[0];
-  await app.window.dispatch('message',{source:first,origin:logBase,data:{type:'ghosting:ready'}});
-  const firstId=first.sent[0].data.record.id;
-  await app.click('save-log');
-  const retry=app.popups[1];
-  await app.window.dispatch('message',{source:retry,origin:logBase,data:{type:'ghosting:ready'}});
-  assert.equal(retry.sent[0].data.record.id,firstId);
-  await app.click('restart');
-  const next=await app.startHand();
-  recordHand(next,5000);
-  await app.click('finish');
-  await app.window.dispatch('message',{source:retry,origin:logBase,data:{type:'ghosting:saved',id:firstId}});
-  assert.doesNotMatch(app.get('log-save-status').textContent,/저장했습니다/);
-  await app.click('save-log');
-  const fresh=app.popups[2];
-  await app.window.dispatch('message',{source:fresh,origin:logBase,data:{type:'ghosting:ready'}});
-  assert.notEqual(fresh.sent[0].data.record.id,firstId);
+test('updated intent creates a newer revision of one recording while a new take receives a new ID',async()=>{
+ const app=createApp({logBase,privateStorage:true});let camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
+ const first=[...app.storedLogs.values()][0];const firstID=first.id;
+ app.get('intent-short').value='차분한';await app.get('intent-short').dispatch('input');await app.runTimers(600);await flush();
+ const revised=app.storedLogs.get(firstID);assert.ok(revised.revision>first.revision);assert.equal(revised.record.intention,'차분한');
+ await app.click('restart');camera=await app.startHand();recordHand(camera,5000);await app.click('finish');await flush();
+ assert.equal(app.storedLogs.size,2);assert.notEqual([...app.storedLogs.values()].at(-1).id,firstID);
 });
 
-test('a late recorder rejection cannot replace a new take video status', async () => {
-  let rejectStop;
-  const app=createApp({logBase,recorderStop:()=>new Promise((_resolve,reject)=>{rejectStop=reject;})});
-  app.get('video-consent').checked=true;
-  const camera=await app.startHand();
-  recordHand(camera);
-  const finishing=app.click('finish');
-  await flush();
-  await app.click('camera-cancel');
-  app.get('video-consent').checked=false;
-  const freshCamera=await app.startHand();
-  recordHand(freshCamera,5000);
-  await app.click('finish');
-  const freshStatus=app.get('video-status').textContent;
-  rejectStop(new Error('Old recording failed later'));
-  await finishing;
-  assert.equal(app.get('video-status').textContent,freshStatus);
-  assert.match(freshStatus,/선택하지 않았어요/);
-  assert.equal(app.document.body.dataset.view,'result');
+test('a late recorder rejection cannot replace the fresh take video or save status',async()=>{
+ let rejectStop,calls=0;
+ const app=createApp({logBase,privateStorage:true,recorderStop:()=>++calls===1 ? new Promise((_resolve,reject)=>{rejectStop=reject;}) : Promise.resolve(new Blob(['fresh-video'],{type:'video/webm'}))});
+ const camera=await app.startHand();recordHand(camera);const finishing=app.click('finish');await flush();await app.click('camera-cancel');
+ const freshCamera=await app.startHand();recordHand(freshCamera,5000);await app.click('finish');await flush();
+ const freshStatus=app.get('video-capture-status').textContent;rejectStop(new Error('Old recording failed later'));await finishing;await flush();
+ assert.equal(app.get('video-capture-status').textContent,freshStatus);assert.equal(freshStatus,'Mock video ready');assert.equal(app.document.body.dataset.view,'result');
+ assert.equal(app.storedLogs.size,1);assert.equal([...app.storedLogs.values()][0].video.size,11);
 });
 
-test('real candidate scores are optional, collapsed and do not replace a different representative label', async () => {
-  const result=copy(aiResult);
-  result.analysis.candidates=[
-    {label:'유연한',score:62,evidence:'유연한 곡선'},
-    {label:'날카로운',score:91,evidence:'급격한 전환'},
-    {label:'우아한',score:76,evidence:'이어지는 선'},
-    {label:'차분한',score:44,evidence:'잠깐의 멈춤'},
-    {label:'미니멀한',score:31,evidence:'작은 이동'},
-    {label:'역동적인',score:29,evidence:'짧은 가속'},
-  ];
-  const app=createApp({automaticAI:true,fetchResponse:async()=>ok(result)});
-  const camera=await app.startHand();
-  recordHand(camera);
-  await app.click('finish');
-  await flush();
-  assert.equal(app.get('analysis-candidates').hidden,false);
-  assert.equal(app.get('analysis-candidates').open,false);
-  const candidates=app.get('candidate-list').children;
-  assert.equal(candidates.length,5);
-  assert.equal(candidates[0].children[0].textContent,'날카로운 · 적합도 91 / 100');
-  assert.equal(candidates[0].children[1].textContent,'급격한 전환');
-  assert.equal(app.get('ai-word').textContent,result.analysis.impression,'Do not pretend the highest score was the representative');
-  assert.match(html,/감정의 확률이나 객관적인 측정값은 아닙니다/);
-  await app.click('restart');
-  await app.click('start');
-  assert.equal(app.get('analysis-candidates').hidden,true);
-  assert.equal(app.get('analysis-candidates').open,false);
+test('candidate expressions are open and unmeasured scores stay unavailable until semantic comparison',async()=>{
+ const result=copy(aiResult);result.analysis.candidates=[{label:'유연한',score:62,evidence:'곡선'},{label:'날카로운',score:91,evidence:'전환'},{label:'우아한',score:76,evidence:'선'},{label:'차분한',score:44,evidence:'멈춤'},{label:'미니멀한',score:31,evidence:'작은 이동'},{label:'역동적인',score:29,evidence:'가속'}];
+ const app=createApp({automaticAI:true,fetchResponse:async()=>ok(result)});const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
+ assert.equal(app.get('analysis-candidates').hidden,false);assert.equal(app.get('analysis-candidates').tagName,'SECTION');
+ const candidates=app.get('candidate-list').children;assert.equal(candidates.length,5);
+ assert.equal(candidates[0].children[0].children[0].textContent,'유연한');assert.equal(candidates[0].children[0].children[1].textContent,'—');
+ assert.equal(candidates[0].children[1].children[0].style.getPropertyValue('--similarity'),'0');
+ assert.equal(app.get('ai-word').textContent,result.analysis.impression);assert.equal(app.get('analyze-button').hidden,true);
+ await app.click('restart');await app.click('start');assert.equal(app.get('analysis-candidates').hidden,true);
+});
+
+
+test('local full-body CPU interpretation has a three-minute deadline and remains cancellable',async()=>{
+ let resolve;const app=createApp({automaticAI:true,fetchResponse:()=>new Promise(done=>{resolve=done;})});
+ const camera=await app.startWebcam();record(camera);await app.click('finish');
+ assert.equal(app.get('analysis-dialog').open,true);assert.match(app.get('analysis-dialog-copy').textContent,/CPU.*3분/);
+ assert.deepEqual([...app.timers.values()].map(timer=>timer.delay),[180000]);
+ const count=app.get('point-count').textContent;await app.click('analysis-cancel');await flush();
+ assert.equal(app.get('point-count').textContent,count);assert.equal(app.calls[0].options.signal.aborted,true);
+ assert.equal(app.get('analysis-status').dataset.code,'CANCELLED');resolve(ok(aiResult));await flush();
+ assert.equal(app.get('analysis-qualities').children.length,0);
+});
+
+test('TOP 5 bars display semantic cosine values rather than provider suitability scores',async()=>{
+ const result=copy(aiResult);result.analysis.candidates=[{label:'유연한',score:99,evidence:'곡선'},{label:'날카로운',score:96,evidence:'전환'}];
+ const semanticCalls=[];
+ const app=createApp({automaticAI:true,fetchResponse:async()=>ok(result),semanticRank:async(query,candidates,options)=>{
+  semanticCalls.push({query,candidates,options});return {method:'fasttext-cosine',results:[{label:'날카로운',similarity:31.5,rawCosine:.315,evidence:'전환'},{label:'유연한',similarity:-12,rawCosine:-.12,evidence:'곡선'}],missingTokens:[]};
+ }});
+ const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
+ assert.equal(semanticCalls.length,0,'Do not fabricate similarity before the viewer provides intent');
+ app.get('intent-short').value='빠름';await app.get('intent-short').dispatch('input');await flush();
+ assert.equal(semanticCalls.length,1);assert.equal(semanticCalls[0].query,'빠름');assert.equal(semanticCalls[0].options.limit,5);
+ const rows=app.get('candidate-list').children;
+ assert.equal(rows[0].children[0].children[0].textContent,'날카로운');assert.equal(rows[0].children[0].children[1].textContent,'31.5');
+ assert.equal(rows[0].children[1].children[0].style.getPropertyValue('--similarity'),'31.5');
+ assert.equal(rows[1].children[0].children[1].textContent,'-12.0');assert.equal(rows[1].children[1].children[0].style.getPropertyValue('--similarity'),'12');assert.match(rows[1].children[1].className,/is-negative/);
+ assert.equal(app.get('ai-word').textContent,result.analysis.impression,'Ranking intent similarity does not replace the AI movement impression');
+ assert.equal(app.calls.length,1);assert.ok(!app.calls[0].options.body.includes('빠름'));assert.match(app.get('similarity-status').textContent,/코사인/);
+});
+
+test('rapid intent changes and fresh takes cannot display stale semantic results',async()=>{
+ const result=copy(aiResult);result.analysis.candidates=[{label:'유연한',score:80,evidence:'곡선'}];const pending=[];
+ const app=createApp({automaticAI:true,fetchResponse:async()=>ok(result),semanticRank:(query,candidates,options)=>new Promise(resolve=>pending.push({query,options,resolve}))});
+ const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
+ app.get('intent-short').value='차분';await app.get('intent-short').dispatch('input');
+ app.get('intent-short').value='빠름';await app.get('intent-short').dispatch('input');
+ assert.equal(pending.length,2);assert.equal(pending[0].options.signal.aborted,true);
+ pending[1].resolve({results:[{label:'유연한',similarity:75,rawCosine:.75,evidence:'최근'}]});await flush();
+ pending[0].resolve({results:[{label:'유연한',similarity:10,rawCosine:.1,evidence:'오래전'}]});await flush();
+ assert.equal(app.get('candidate-list').children[0].children[0].children[1].textContent,'75.0');
+ app.get('intent-short').value='우아함';await app.get('intent-short').dispatch('input');
+ await app.click('restart');await app.click('start');assert.equal(pending[2].options.signal.aborted,true);
+ pending[2].resolve({results:[{label:'유연한',similarity:99,rawCosine:.99,evidence:'이전 기록'}]});await flush();
+ assert.equal(app.get('analysis-candidates').hidden,true);assert.equal(app.get('candidate-list').children.length,0);
+ assert.equal(app.get('intent-word').textContent,'선택 전');
 });

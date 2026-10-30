@@ -125,10 +125,31 @@ export function validateRecord(raw) {
   const record = {
     id: raw.id.toLowerCase(), createdAt: new Date(created).toISOString(),
     source: raw.source, durationMs: finite(raw.durationMs, 0, 60000),
+    revision: raw.revision === undefined ? 0 : finite(raw.revision,0,Number.MAX_SAFE_INTEGER),
     handTarget: ['indexTip', 'wrist'].includes(raw.handTarget) ? raw.handTarget : null,
     intention: text(raw.intention, 120, true), details: text(raw.details, 10000, true),
     metrics: safeMetrics(raw.metrics), analysis: null, analysisError: null,
   };
+  if (!Number.isSafeInteger(record.revision)) fail(400,'INVALID_RECORD','기록 버전은 정수여야 합니다.');
+  if (raw.similarity !== undefined && raw.similarity !== null) {
+    const similarity=raw.similarity;
+    if (!plain(similarity) || !Array.isArray(similarity.results) || similarity.results.length > 50) fail(400,'INVALID_RECORD','유사도 형식을 확인해 주세요.');
+    record.similarity={
+      method:text(similarity.method,100),model:text(similarity.model,300),
+      results:similarity.results.map(item=>{
+        if (!plain(item)) fail(400,'INVALID_RECORD','유사도 후보 형식을 확인해 주세요.');
+        const result={label:text(item.label,100),similarity:finite(item.similarity,-100,100),evidence:text(item.evidence,1000,true)};
+        if (item.rawCosine !== undefined) result.rawCosine=finite(item.rawCosine,-1,1);
+        return result;
+      })
+    };
+    if(similarity.queryCoverage!==undefined)record.similarity.queryCoverage=finite(similarity.queryCoverage,0,1);
+    for(const key of ['missingTokens','matchedTokens','limitations'])if(similarity[key]!==undefined){
+      if(!Array.isArray(similarity[key])||similarity[key].length>100)fail(400,'INVALID_RECORD','단어 비교 출처를 확인해 주세요.');
+      record.similarity[key]=similarity[key].map(value=>text(value,key==='limitations'?1000:100));
+    }
+    for (const key of ['input','query','generatedAt','source','rankingScope']) if (similarity[key] !== undefined) record.similarity[key]=text(similarity[key],key==='input'||key==='query'?2000:300);
+  }
   if (raw.analysis !== null && raw.analysis !== undefined) {
     const a = raw.analysis;
     if (!plain(a) || !Array.isArray(a.qualities) || a.qualities.length > 10 ||
@@ -147,6 +168,10 @@ export function validateRecord(raw) {
         if (!plain(c)) fail(400, 'INVALID_RECORD', '후보 형식을 확인해 주세요.');
         return { label: text(c.label, 100), score: finite(c.score, 0, 100), evidence: text(c.evidence, 1000) };
       });
+    }
+    if (a.motionCaption !== undefined) {
+      if (!plain(a.motionCaption) || enc.encode(JSON.stringify(a.motionCaption)).length > 16000) fail(400,'INVALID_RECORD','움직임 해석 출처를 확인해 주세요.');
+      record.analysis.motionCaption=JSON.parse(JSON.stringify(a.motionCaption));
     }
     if (a.rubric !== undefined) {
       if (!plain(a.rubric) || enc.encode(JSON.stringify(a.rubric)).length > 16000) fail(400, 'INVALID_RECORD', '기준 형식을 확인해 주세요.');
@@ -196,21 +221,21 @@ async function save(request, env, now) {
     if ((videoType === 'video/webm' && !webm) || (videoType === 'video/mp4' && !mp4)) fail(400, 'VIDEO_TYPE', '영상 파일 형식이 맞지 않습니다.');
     videoBytes = video.size;
   }
-  const existing = await env.DB.prepare('SELECT state FROM records WHERE id = ?').bind(record.id).first();
+  const existing = await env.DB.prepare('SELECT state, revision FROM records WHERE id = ?').bind(record.id).first();
   if (existing) {
-    if (existing.state === 'ready') return json({ id: record.id, alreadySaved: true });
+    if (existing.state === 'ready') return json({ id: record.id, revision:existing.revision, alreadySaved: true });
     fail(409, 'RECORD_PENDING', '이 기록은 아직 저장 또는 삭제 중입니다. 잠시 후 다시 확인해 주세요.');
   }
   record.hasVideo = videoBytes > 0;
   const videoKey = `video:${record.id}:${crypto.randomUUID()}`;
   const inserted = await env.DB.prepare(`INSERT INTO records
-    (id, created_at, stored_at, source, duration_ms, impression, metadata, video_bytes, video_type, video_key, state)
-    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
+    (id, created_at, stored_at, source, duration_ms, impression, metadata, video_bytes, video_type, video_key, revision, state)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
     WHERE (SELECT COUNT(*) FROM records) < ? AND
       (SELECT COALESCE(SUM(video_bytes), 0) FROM records) + ? <= ?
     ON CONFLICT(id) DO NOTHING`)
     .bind(record.id, record.createdAt, now, record.source, record.durationMs, record.analysis?.impression || null,
-      JSON.stringify(record), videoBytes, videoType, videoKey, MAX_RECORDS, videoBytes, MAX_STORAGE_BYTES).run();
+      JSON.stringify(record), videoBytes, videoType, videoKey, record.revision, MAX_RECORDS, videoBytes, MAX_STORAGE_BYTES).run();
   if (inserted.meta.changes !== 1) fail(409, 'STORAGE_LIMIT', '저장 한도에 도달했거나 같은 기록을 저장 중입니다. 기존 기록을 확인해 주세요.');
   try {
     if (videoBytes) await env.VIDEOS.put(videoKey, await video.arrayBuffer());
@@ -224,7 +249,31 @@ async function save(request, env, now) {
     await env.DB.prepare('DELETE FROM records WHERE id = ? AND video_key = ?').bind(record.id, videoKey).run();
     fail(503, 'SAVE_FAILED', '저장이 끝나지 않았어요. 잠시 후 다시 시도해 주세요.');
   }
-  return json({ id: record.id }, 201);
+  return json({ id: record.id,revision:record.revision }, 201);
+}
+async function updateMetadata(request,env,initialRow,now) {
+  if (!(request.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) fail(400,'INVALID_RECORD','JSON 기록 형식을 확인해 주세요.');
+  let raw;
+  try { raw=JSON.parse(new TextDecoder().decode(await bytes(request,MAX_METADATA_BYTES))); }
+  catch(error) { if(error instanceof HttpError) throw error; fail(400,'INVALID_RECORD','기록을 읽지 못했어요.'); }
+  const record=validateRecord(plain(raw?.record)?raw.record:raw);
+  if(record.id!==initialRow.id || record.createdAt!==initialRow.created_at || record.source!==initialRow.source) fail(409,'IMMUTABLE_RECORD','기록 번호·시각·입력 방식은 바꿀 수 없습니다.');
+  const videoKey=initialRow.video_key;
+  let row=initialRow;
+  // Compare-and-swap includes the private video's generation, so a deleted and
+  // recreated record cannot be overwritten by an older in-flight edit.
+  for(let attempt=0;attempt<4;attempt++) {
+    if(row.state!=='ready') fail(409,'RECORD_PENDING','아직 저장 또는 삭제 중인 기록입니다. 잠시 후 다시 시도해 주세요.');
+    if(record.revision<=row.revision) return json({id:record.id,revision:row.revision,alreadySaved:true,stale:record.revision<row.revision});
+    record.hasVideo=row.video_bytes>0;
+    const result=await env.DB.prepare("UPDATE records SET metadata = ?, revision = ?, stored_at = ?, duration_ms = ?, impression = ? WHERE id = ? AND revision = ? AND video_key = ? AND state = 'ready'")
+      .bind(JSON.stringify(record),record.revision,now,record.durationMs,record.analysis?.impression || null,record.id,row.revision,videoKey).run();
+    if(result.meta.changes===1) return json({id:record.id,revision:record.revision,updated:true});
+    row=await env.DB.prepare('SELECT * FROM records WHERE id = ?').bind(record.id).first();
+    if(!row) fail(404,'NOT_FOUND','기록을 찾을 수 없어요.');
+    if(row.video_key!==videoKey) fail(409,'RECORD_REPLACED','이전 기록이 삭제되었어요. 새 기록으로 다시 보관해 주세요.');
+  }
+  fail(409,'UPDATE_CONFLICT','다른 창에서 기록을 갱신 중입니다. 잠시 후 다시 시도해 주세요.');
 }
 export async function handleLogbook(request, env, { now = Date.now() } = {}) {
   try {
@@ -269,10 +318,10 @@ export async function handleLogbook(request, env, { now = Date.now() } = {}) {
       return json({ authenticated: false }, 200, { 'Set-Cookie': cookie('', 0) });
     }
     if (url.pathname === '/api/records' && request.method === 'GET') {
-      const { results } = await env.DB.prepare("SELECT id, created_at, source, duration_ms, impression, video_bytes, state FROM records ORDER BY created_at DESC LIMIT 500").all();
+      const { results } = await env.DB.prepare("SELECT id, created_at, source, duration_ms, impression, video_bytes, revision, state FROM records ORDER BY created_at DESC LIMIT 500").all();
       return json({ records: results.map(r => ({
         id: r.id, createdAt: r.created_at, source: r.source, durationMs: r.duration_ms,
-        impression: r.impression, hasVideo: r.video_bytes > 0, state: r.state
+        impression: r.impression, hasVideo: r.video_bytes > 0, revision:r.revision, state: r.state
       })), storage: { usedBytes: results.reduce((n, r) => n + r.video_bytes, 0), maxBytes: MAX_STORAGE_BYTES, maxRecords: MAX_RECORDS } });
     }
     if (url.pathname === '/api/records' && request.method === 'POST') {
@@ -292,7 +341,11 @@ export async function handleLogbook(request, env, { now = Date.now() } = {}) {
       return json({ deleted: true });
     }
     if (row.state !== 'ready') fail(409, 'RECORD_PENDING', '아직 저장 또는 삭제 중인 기록입니다. 목록에서 삭제 후 다시 저장할 수 있어요.');
-    if (!match[2] && request.method === 'GET') return json({ record: JSON.parse(row.metadata) });
+    if (!match[2] && request.method === 'PUT') {
+      await limited(env.WRITE_LIMITER,'owner');
+      return await updateMetadata(request,env,row,now);
+    }
+    if (!match[2] && request.method === 'GET') return json({ record: {...JSON.parse(row.metadata),revision:row.revision} });
     if (match[2] && ['GET', 'HEAD'].includes(request.method)) {
       if (!row.video_bytes) fail(404, 'NO_VIDEO', '이 기록에는 저장된 영상이 없어요.');
       const range = videoRange(request.headers.get('range'), row.video_bytes);

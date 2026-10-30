@@ -1,0 +1,66 @@
+{
+  "repository": "https://github.com/OpenMotionLab/MotionGPT",
+  "revision": "001aaca8d0ee218fc17f8265d11ac124044fe42f",
+  "files": [
+    {
+      "upstream": "LICENSE",
+      "local": "vendor/LICENSE-MotionGPT.txt",
+      "sha256": "37d8dee3fc9ee67e64375b5988461304a789ec8da2bbf2be5c37594e9338b41d",
+      "bytes": 1070
+    },
+    {
+      "upstream": "mGPT/archs/mgpt_vq.py",
+      "local": "vendor/mgpt/archs/mgpt_vq.py",
+      "sha256": "b2c51f209a7b511ef896a50c74ceeb99390410b228aa973d12b07cb156b0184c",
+      "bytes": 6019
+    },
+    {
+      "upstream": "mGPT/archs/mgpt_lm.py",
+      "local": "vendor/mgpt/archs/mgpt_lm.py",
+      "sha256": "9d0115ef30037e814a98db77452004f2070162570303897744c2f41c5394d53d",
+      "bytes": 23985
+    },
+    {
+      "upstream": "mGPT/archs/tools/resnet.py",
+      "local": "vendor/mgpt/archs/tools/resnet.py",
+      "sha256": "f5e79053ca6b5bf4c896dbb7ce97c472f8e996d0104463fb5af5cca05cea2cd5",
+      "bytes": 2653
+    },
+    {
+      "upstream": "mGPT/archs/tools/quantize_cnn.py",
+      "local": "vendor/mgpt/archs/tools/quantize_cnn.py",
+      "sha256": "e51e7640d420a38b52c9cf371093d740d9b2b3ece025e5d6fa3372781762c28b",
+      "bytes": 14044
+    },
+    {
+      "upstream": "mGPT/archs/tools/token_emb.py",
+      "local": "vendor/mgpt/archs/tools/token_emb.py",
+      "sha256": "6aefa550b7a6400842810fa8aef884b209773ffd9615064145ad42b785db54f6",
+      "bytes": 3174
+    },
+    {
+      "upstream": "mGPT/data/humanml/common/quaternion.py",
+      "local": "vendor/mgpt/data/humanml/common/quaternion.py",
+      "sha256": "17e96bb3af31952183453d4dc15f11f88bb940342f532f3860012aeecf1f85ad",
+      "bytes": 12866
+    },
+    {
+      "upstream": "mGPT/data/humanml/common/skeleton.py",
+      "local": "vendor/mgpt/data/humanml/common/skeleton.py",
+      "sha256": "bcee4778048295eced2cb0e071c9ff790fa9b78522f7a035a948e007c440c946",
+      "bytes": 8698
+    },
+    {
+      "upstream": "mGPT/data/humanml/scripts/motion_process.py",
+      "local": "vendor/mgpt/data/humanml/scripts/motion_process.py",
+      "sha256": "0dedc5ab51f9770a39afc3b966fb9a2c94d8694d2a2ced1cf8b91ea90083c1c5",
+      "bytes": 21036
+    },
+    {
+      "upstream": "mGPT/data/humanml/utils/paramUtil.py",
+      "local": "vendor/mgpt/data/humanml/utils/paramUtil.py",
+      "sha256": "fe0265f3dcd0d466690d816eae973fcece145f64551cef7e46fed7ef3de80d34",
+      "bytes": 1857
+    }
+  ]
+}

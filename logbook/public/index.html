@@ -7,8 +7,8 @@
   <meta name="theme-color" content="#111b20">
   <meta name="robots" content="noindex, nofollow">
   <title>Ghosting — 나의 움직임 기록</title>
-  <link rel="stylesheet" href="/styles.css?v=20261022-log-recovery">
-  <script src="/app.js?v=20261022-log-recovery" defer></script>
+  <link rel="stylesheet" href="/styles.css?v=20261030-auto-revisions">
+  <script src="/app.js?v=20261030-auto-revisions" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -69,8 +69,9 @@
             <p id="detail-description" class="description"></p>
             <ul id="detail-observations" class="observations"></ul>
             <section class="candidate-section" aria-labelledby="candidates-heading">
-              <div class="section-heading"><h3 id="candidates-heading">AI가 함께 제시한 표현</h3><span class="badge">적합도 / 100</span></div>
-              <p class="fine-print">각 수치는 AI가 스스로 보고한 표현의 적합도입니다. 확률·정확도·모델 내부의 실제 후보 순위가 아닙니다. 보고하지 않은 수치는 0으로 표시하지 않습니다.</p>
+              <div class="section-heading"><h3 id="candidates-heading">AI가 함께 제시한 표현</h3><span class="badge" id="candidate-scale">적합도 / 100</span></div>
+              <p class="fine-print" id="candidate-description">각 수치는 AI가 스스로 보고한 표현의 적합도입니다. 확률·정확도·모델 내부의 실제 후보 순위가 아닙니다. 보고하지 않은 수치는 0으로 표시하지 않습니다.</p>
+              <p class="fine-print" id="similarity-provenance"></p>
               <p id="ranking-note" class="error-note" hidden>AI가 고른 대표 인상과 가장 높은 적합도의 표현이 다릅니다. 보고된 내용을 그대로 표시했습니다.</p>
               <div id="candidate-list" class="candidate-list"></div>
             </section>

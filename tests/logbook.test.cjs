@@ -169,7 +169,7 @@ test('authenticated video and candidate scores survive save/list/detail/range/do
   let response = await call(f, '/api/records', { method: 'POST', cookie, body: upload(data) });
   assert.equal(response.status, 201, JSON.stringify(await response.clone().json()));
   response = await call(f, '/api/records', { method: 'POST', cookie, body: upload(data) });
-  assert.deepEqual(await response.json(), { id: data.id, alreadySaved: true });
+  assert.deepEqual(await response.json(), { id: data.id, revision:0, alreadySaved: true });
   const list = await (await call(f, '/api/records', { cookie })).json();
   assert.equal(list.records.length, 1);
   assert.equal(list.records[0].hasVideo, true);
@@ -365,4 +365,65 @@ test('record validator does not invent candidate scores, accepts failures withou
   assert.deepEqual(videoRange('bytes=-3', 10), { start: 7, end: 9 });
   assert.deepEqual(videoRange('bytes=3-', 10), { start: 3, end: 9 });
   assert.equal(videoRange('bytes=0-2,4-5', 10), false);
+});
+
+
+test('revision PUT updates private metadata and semantic provenance while preserving its stored video generation',async()=>{
+ const f=await fixture(),cookie=await login(f),data={...record(),revision:1};
+ assert.equal((await call(f,'/api/records',{cookie,method:'POST',body:upload(data)})).status,201);
+ const initial=f.sqlite.prepare('SELECT * FROM records WHERE id=?').get(data.id);const originalVideo=f.videos.get(initial.video_key);
+ const next={...data,revision:2,intention:'단호한',details:'새 입력',similarity:{method:'fasttext-cosine',model:'cc.ko.300',results:[{label:'차분한',similarity:-12.5,rawCosine:-.125,evidence:'실제 코사인'}]},analysis:{...data.analysis,motionCaption:{provider:'MotionGPT',model:'MotionGPT-base',text:'a person turns'}}};
+ let response=await call(f,'/api/records/'+data.id,{cookie,method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(next)});
+ assert.deepEqual(await response.json(),{id:data.id,revision:2,updated:true});
+ const saved=(await(await call(f,'/api/records/'+data.id,{cookie})).json()).record;
+ assert.equal(saved.revision,2);assert.equal(saved.intention,'단호한');assert.deepEqual(saved.similarity,next.similarity);assert.deepEqual(saved.analysis.motionCaption,next.analysis.motionCaption);assert.equal(saved.hasVideo,true);
+ const current=f.sqlite.prepare('SELECT * FROM records WHERE id=?').get(data.id);assert.equal(current.video_key,initial.video_key);assert.equal(f.videos.size,1);assert.strictEqual(f.videos.get(current.video_key),originalVideo);
+ for(const version of [1,2]){
+  response=await call(f,'/api/records/'+data.id,{cookie,method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...next,revision:version,intention:'후퇴하면 안 됨'})});
+  assert.equal(response.status,200);assert.equal((await response.json()).revision,2);
+ }
+ assert.equal(JSON.parse(f.sqlite.prepare('SELECT metadata FROM records WHERE id=?').get(data.id).metadata).intention,'단호한');f.sqlite.close();
+});
+
+test('metadata PUT requires owner and same-origin credentials and cannot change immutable identity fields',async()=>{
+ const f=await fixture(),cookie=await login(f),data={...record(),revision:1};
+ await call(f,'/api/records',{cookie,method:'POST',body:upload(data,false)});
+ const options={method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,revision:2})};
+ assert.equal((await call(f,'/api/records/'+data.id,options)).status,401);
+ assert.equal((await call(f,'/api/records/'+data.id,{...options,cookie,origin:'https://evil.example'})).status,403);
+ for(const changed of [{id:randomUUID()},{createdAt:new Date(now+1).toISOString()},{source:'webcam'}]){
+  const response=await call(f,'/api/records/'+data.id,{...options,cookie,body:JSON.stringify({...data,revision:2,...changed})});
+  assert.equal(response.status,409);assert.equal((await response.json()).error.code,'IMMUTABLE_RECORD');
+ }
+ assert.equal((await call(f,'/api/records/'+data.id,{...options,cookie,body:JSON.stringify({...data,revision:1.5})})).status,400);
+ assert.equal((await call(f,'/api/records/'+data.id,{...options,cookie,headers:{'Content-Type':'application/json','Content-Length':String(200*1024)}})).status,413);
+ f.sqlite.close();
+});
+
+test('concurrent metadata edits retain the greatest revision regardless of CAS scheduling order',async()=>{
+ for(const blockedRevision of [2,3]){
+  const f=await fixture(),cookie=await login(f),data={...record(),revision:1};await call(f,'/api/records',{cookie,method:'POST',body:upload(data,false)});
+  const entered=deferred(),release=deferred(),prepare=f.env.DB.prepare.bind(f.env.DB);let held=false;
+  f.env.DB.prepare=sql=>{
+   const statement=prepare(sql);if(!sql.startsWith('UPDATE records SET metadata'))return statement;
+   return {bind(...values){const bound=statement.bind(...values);return {...bound,run:async()=>{if(values[1]===blockedRevision&&!held){held=true;entered.resolve();await release.promise;}return bound.run();}};}};
+  };
+  const update=revision=>call(f,'/api/records/'+data.id,{cookie,method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,revision,intention:'버전'+revision})});
+  const blocked=update(blockedRevision);await entered.promise;
+  assert.equal((await update(blockedRevision===2?3:2)).status,200);release.resolve();assert.equal((await blocked).status,200);
+  const saved=(await(await call(f,'/api/records/'+data.id,{cookie})).json()).record;assert.equal(saved.revision,3);assert.equal(saved.intention,'버전3');f.sqlite.close();
+ }
+});
+
+test('a deleted and recreated video generation rejects an old pending metadata CAS',async()=>{
+ const f=await fixture(),cookie=await login(f),data={...record(),revision:1};await call(f,'/api/records',{cookie,method:'POST',body:markedUpload(data,30)});
+ const entered=deferred(),release=deferred(),prepare=f.env.DB.prepare.bind(f.env.DB);let held=false;
+ f.env.DB.prepare=sql=>{
+  const statement=prepare(sql);if(!sql.startsWith('UPDATE records SET metadata'))return statement;
+  return {bind(...values){const bound=statement.bind(...values);return {...bound,run:async()=>{if(!held){held=true;entered.resolve();await release.promise;}return bound.run();}};}};
+ };
+ const pending=call(f,'/api/records/'+data.id,{cookie,method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,revision:2,intention:'지연된 예전 편집'})});
+ await entered.promise;await call(f,'/api/records/'+data.id,{cookie,method:'DELETE'});await call(f,'/api/records',{cookie,method:'POST',body:markedUpload({...data,intention:'새 영상'},60)});
+ release.resolve();const response=await pending;assert.equal(response.status,409);assert.equal((await response.json()).error.code,'RECORD_REPLACED');
+ const saved=(await(await call(f,'/api/records/'+data.id,{cookie})).json()).record;assert.equal(saved.intention,'새 영상');assert.equal(saved.revision,1);assert.equal(f.videos.size,1);f.sqlite.close();
 });

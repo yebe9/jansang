@@ -1,0 +1,9 @@
+Filtered and quantized fastText Korean word vectors
+Original authors: Edouard Grave, Piotr Bojanowski, Prakhar Gupta, Armand Joulin, Tomas Mikolov.
+Original: https://dl.fbaipublicfiles.com/fasttext/vectors-crawl/cc.ko.300.vec.gz
+Reference: https://fasttext.cc/docs/en/crawl-vectors.html
+License: Creative Commons Attribution-ShareAlike 3.0 Unported (CC BY-SA 3.0)
+https://creativecommons.org/licenses/by-sa/3.0/
+Legal code: https://creativecommons.org/licenses/by-sa/3.0/legalcode
+Changes: frequency filtering and int8 row quantization, with source/provenance in ko-fasttext.json.
+This adapted vector dataset is distributed under the same CC BY-SA 3.0 license.

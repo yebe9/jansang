@@ -27,6 +27,7 @@
   function captureAllowed(event, opener, authenticated, captureMode) {
     return Boolean(authenticated && captureMode && opener && event.source === opener && ALLOWED_ORIGINS.has(event.origin) && isObject(event.data) && event.data.type === 'ghosting:capture');
   }
+  const revisionValue=record=>Number.isSafeInteger(record?.revision)&&record.revision>=0?record.revision:0;
   function createApp(win, doc) {
     const $ = id => doc.getElementById(id);
     let authenticated = false;
@@ -43,10 +44,60 @@
     const captureParams = new URLSearchParams(win.location.search);
     let captureMode = captureParams.get('capture') === '1';
     const autoSave = captureMode && captureParams.get('save') === '1';
+    const continuousMode = autoSave && captureParams.get('auto') === '1';
+    const inbox=new Map(),waitingAcks=new Map(),storedRevisions=new Map(),deletedIDs=new Set();
+    try{const remembered=JSON.parse(win.sessionStorage?.getItem('ghosting-log-deleted-ids')||'[]');if(Array.isArray(remembered))for(const id of remembered)if(typeof id==='string'&&id.length<=100)deletedIDs.add(id);}catch{}
     let confirmation = null;
     const activeRequests = new Set();
     const downloadURLs = new Set();
 
+    function acknowledge(type,capture,extra={}) {
+      try { win.opener?.postMessage({type,id:capture.record.id,revision:revisionValue(capture.record),...extra},capture.origin); } catch {}
+    }
+    function remember(capture) {
+      let versions=waitingAcks.get(capture.record.id);
+      if(!versions){versions=new Map();waitingAcks.set(capture.record.id,versions);}
+      versions.set(revisionValue(capture.record),{record:{id:capture.record.id,revision:revisionValue(capture.record)},origin:capture.origin});
+    }
+    function saved(capture,storedRevision) {
+      storedRevisions.set(capture.record.id,Math.max(storedRevisions.get(capture.record.id)||0,storedRevision));
+      const versions=waitingAcks.get(capture.record.id);
+      if(versions)for(const [version,waiting] of versions){
+        if(version<=storedRevision){acknowledge('ghosting:saved',waiting,{storedRevision});versions.delete(version);}
+      }
+      if(!versions?.size)waitingAcks.delete(capture.record.id);
+    }
+    function notifyPendingError(message,code='LOGIN_REQUIRED') {
+      for(const versions of waitingAcks.values())for(const capture of versions.values())acknowledge('ghosting:error',capture,{message,code});
+    }
+    const deletedMessage='기록함에서 삭제한 움직임입니다. 새로 기록해주세요.';
+    function rejectDeleted(capture) {
+      status('workspace-status',deletedMessage,true);
+      acknowledge('ghosting:error',capture,{message:deletedMessage,code:'RECORD_DELETED'});
+    }
+    function markDeleted(id) {
+      deletedIDs.add(id);storedRevisions.delete(id);
+      try{win.sessionStorage?.setItem('ghosting-log-deleted-ids',JSON.stringify([...deletedIDs]));}catch{}
+      for(const capture of waitingAcks.get(id)?.values() || [])rejectDeleted(capture);
+      waitingAcks.delete(id);inbox.delete(id);
+      if(pending?.record.id===id){pending=null;clearVideo();updateCaptureNotice();}
+      if(selected?.id===id)hideDetail();
+    }
+    async function updateStoredCapture(id,record) {
+      try {
+        return await request('/api/records/'+encodeURIComponent(id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(record)});
+      } catch(error) {
+        if(error.status===404){markDeleted(id);throw Object.assign(new Error(deletedMessage),{status:404,code:'RECORD_DELETED'});}
+        throw error;
+      }
+    }
+    function nextCapture() {
+      if(pending || saving || !authenticated)return;
+      const entry=inbox.entries().next().value;
+      if(!entry)return;
+      inbox.delete(entry[0]);pending=entry[1];updateCaptureNotice();showPending();
+      if(autoSave)void saveCapture();
+    }
     function status(id, message, error = false) {
       $(id).textContent = message;
       $(id).classList.toggle('error', error);
@@ -79,6 +130,7 @@
       status('detail-status', '');
     }
     function lock(message = '비밀번호를 입력해 기록함을 열어주세요.') {
+      notifyPendingError(message);
       epoch++;
       authenticated = false;
       for (const controller of activeRequests) controller.abort();
@@ -152,9 +204,10 @@
       updateCaptureNotice();
       const resumeCapture = pending;
       if (pending) showPending();
-      announceReady();
       await refreshRecords();
+      announceReady();
       if (resumeCapture && pending === resumeCapture && autoSave) await saveCapture();
+      else nextCapture();
     }
     async function checkSession() {
       const currentEpoch = epoch;
@@ -220,6 +273,10 @@
         const result = await request('/api/records');
         if (!authenticated || currentEpoch !== epoch || version !== listVersion) return;
         records = Array.isArray(result.records) ? result.records.filter(record => isObject(record) && typeof record.id === 'string') : [];
+        const listedIDs=new Set(records.map(record=>record.id));
+        for(const id of storedRevisions.keys())if(!listedIDs.has(id))markDeleted(id);
+        storedRevisions.clear();
+        for(const record of records)if((!record.state||record.state==='ready')&&!deletedIDs.has(record.id))storedRevisions.set(record.id,revisionValue(record));
         $('storage-status').textContent = Number.isFinite(result.storage?.usedBytes) && Number.isFinite(result.storage?.maxBytes)
           ? `${(result.storage.usedBytes / 1024 / 1024).toFixed(1)} / ${(result.storage.maxBytes / 1024 / 1024).toFixed(0)} MiB · ${records.length} / ${Number.isFinite(result.storage.maxRecords) ? result.storage.maxRecords : 500}개`
           : '';
@@ -231,29 +288,36 @@
         if (version === listVersion) $('refresh').disabled = false;
       }
     }
-    function renderCandidates(candidates) {
+    function renderCandidates(candidates,similarity) {
+      const semantic=isObject(similarity)&&Array.isArray(similarity.results);
+      if(semantic)candidates=similarity.results;
+      $('candidates-heading').textContent=semantic?'내 의도와 표현의 의미 유사도':'AI가 함께 제시한 표현';
+      $('candidate-scale').textContent=semantic?'코사인 × 100':'AI 적합도 / 100';
+      $('candidate-description').textContent=semantic?'내가 남긴 말과 각 표현을 단어 벡터로 비교한 의미 유사도입니다. 감정의 확률이나 동작 일치율이 아닙니다. 음수는 벡터 방향이 반대임을 뜻합니다.':'각 수치는 AI가 스스로 보고한 표현의 적합도입니다. 확률·정확도·모델 내부의 실제 후보 순위가 아닙니다. 보고하지 않은 수치는 0으로 표시하지 않습니다.';
+      $('similarity-provenance').textContent=semantic?[text(similarity.method),text(similarity.model)].filter(Boolean).join(' · '):'';
       $('candidate-list').replaceChildren();
       if (!Array.isArray(candidates) || !candidates.length) {
-        $('candidate-list').append(element('p', 'fine-print', '이 분석에는 후보 표현과 적합도 보고가 없습니다.'));
+        $('candidate-list').append(element('p', 'fine-print', semantic?'계산된 유사도 후보가 아직 없습니다.':'이 분석에는 후보 표현과 적합도 보고가 없습니다.'));
         return;
       }
       for (const candidate of candidates.slice(0, 50)) {
         if (!isObject(candidate)) continue;
-        const score = scoreValue(candidate.score);
+        const score = semantic ? (typeof candidate.similarity==='number'&&Number.isFinite(candidate.similarity)&&candidate.similarity>=-100&&candidate.similarity<=100?candidate.similarity:null) : scoreValue(candidate.score);
         const row = element('div', 'candidate');
         const header = element('div', 'candidate-header');
         header.append(element('span', 'candidate-label', text(candidate.label) || '표현 미보고'));
-        header.append(element('span', 'candidate-score', score === null ? '미보고' : `${Math.round(score * 10) / 10} / 100`));
+        header.append(element('span', 'candidate-score', score === null ? '미보고' : `${Math.round(score * 10) / 10}${semantic?'':' / 100'}`));
         row.append(header);
         if (score !== null) {
           const bar = element('div', 'candidate-bar');
           bar.setAttribute('role', 'meter');
-          bar.setAttribute('aria-label', `${text(candidate.label) || '표현'} AI 보고 적합도`);
-          bar.setAttribute('aria-valuemin', '0');
+          bar.setAttribute('aria-label', `${text(candidate.label) || '표현'} ${semantic?'내 의도와 의미 유사도':'AI 보고 적합도'}`);
+          bar.setAttribute('aria-valuemin', semantic?'-100':'0');
           bar.setAttribute('aria-valuemax', '100');
           bar.setAttribute('aria-valuenow', String(score));
           const fill = element('div', 'candidate-fill');
-          fill.style.width = `${score}%`;
+          fill.style.width = `${semantic?Math.abs(score)/2:score}%`;
+          if(semantic){bar.style.position='relative';fill.style.marginLeft=`${score>=0?50:50+score/2}%`;const zero=element('span');zero.style.position='absolute';zero.style.left='50%';zero.style.top='0';zero.style.height='100%';zero.style.width='1px';zero.style.background='#b6c7bb';bar.append(zero);}
           bar.append(fill); row.append(bar);
         }
         row.append(element('p', 'candidate-evidence', text(candidate.evidence) || '근거 미보고'));
@@ -288,9 +352,9 @@
       const error = typeof record.analysisError === 'string' ? record.analysisError : text(record.analysisError?.message);
       $('analysis-error').hidden = !error;
       $('analysis-error').textContent = error ? `분석 오류 기록: ${error}` : '';
-      renderCandidates(analysis.candidates);
+      renderCandidates(analysis.candidates,record.similarity);
       const rubric = isObject(analysis.rubric) ? analysis.rubric : null;
-      $('ranking-note').hidden = rubric?.candidateRankingConsistent !== false;
+      $('ranking-note').hidden = Boolean(record.similarity)||rubric?.candidateRankingConsistent !== false;
       $('rubric-panel').hidden = !rubric;
       $('rubric-note').textContent = text(rubric?.note);
       $('rubric-eligibility').textContent = isObject(rubric?.eligible)
@@ -308,6 +372,8 @@
       appendMetric('기록 길이', duration(record.durationMs));
       if (record.handTarget) appendMetric('자취 기준', record.handTarget === 'wrist' ? '손목' : record.handTarget === 'indexTip' ? '검지 끝' : text(record.handTarget));
       if (record.id) appendMetric('기록 ID', text(record.id));
+      appendMetric('보관 버전',String(revisionValue(record)));
+      if(isObject(analysis.motionCaption))appendMetric('움직임 해석 출처',JSON.stringify(analysis.motionCaption));
       if (isObject(record.metrics)) for (const [key, value] of Object.entries(record.metrics).slice(0, 50)) {
         if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') appendMetric(key, String(value));
       }
@@ -356,61 +422,69 @@
       $('save-capture').textContent = saving ? '기록을 저장하고 있어요…' : '이 기록 저장하기';
     }
     async function receiveCapture(event) {
-      if (!captureAllowed(event, win.opener, authenticated, captureMode)) return;
-      if (pending && pending.record.id === event.data.record?.id) {
-        try { win.opener.postMessage({type:'ghosting:received',id:pending.record.id},event.origin); } catch {}
-        return;
+      if(!captureAllowed(event,win.opener,authenticated,captureMode))return;
+      const record=event.data.record;
+      if(!isObject(record) || typeof record.id!=='string' || (record.revision!==undefined && (!Number.isSafeInteger(record.revision)||record.revision<0))){
+        status('workspace-status','받은 기록의 형식을 확인할 수 없어요. 원래 화면에서 다시 보내주세요.',true);return;
       }
-      if (pending || saving) {
-        status('workspace-status', '먼저 받은 기록이 저장 대기 중입니다. 저장하거나 취소한 뒤 원래 화면에서 다시 보내주세요.', true);
-        return;
+      const capture={record,video:event.data.video||null,origin:event.origin};
+      if(capture.video && (!(capture.video instanceof win.Blob)||!capture.video.size||capture.video.size>MAX_VIDEO_BYTES||!/^video\/(webm|mp4)(?:;|$)/i.test(capture.video.type))){
+        status('workspace-status','영상은 15 MiB 이하의 WebM 또는 MP4 파일이어야 합니다. 원래 화면에서 다시 기록해주세요.',true);
+        acknowledge('ghosting:error',capture,{message:'영상 형식이나 크기를 확인해 주세요.',code:'INVALID_VIDEO'});return;
       }
-      if (!isObject(event.data.record)) {
-        status('workspace-status', '받은 기록의 형식을 확인할 수 없어요. 원래 화면에서 다시 보내주세요.', true);
-        return;
+      if(deletedIDs.has(record.id)){rejectDeleted(capture);return;}
+      const revision=revisionValue(record);
+      if((pending||saving) && pending?.record.id!==record.id && !continuousMode){
+        status('workspace-status','먼저 받은 기록이 저장 대기 중입니다. 저장하거나 취소한 뒤 원래 화면에서 다시 보내주세요.',true);
+        acknowledge('ghosting:error',capture,{message:'먼저 받은 기록을 저장한 뒤 다시 보내주세요.',code:'CAPTURE_BUSY'});return;
       }
-      const video = event.data.video;
-      if (video != null && (!(video instanceof win.Blob) || !video.size || video.size > MAX_VIDEO_BYTES || !/^video\/(webm|mp4)(?:;|$)/i.test(video.type))) {
-        status('workspace-status', '영상은 15 MiB 이하의 WebM 또는 MP4 파일이어야 합니다. 원래 화면에서 다시 기록해주세요.', true);
-        return;
-      }
-      pending = { record: event.data.record, video: video || null, origin: event.origin };
-      updateCaptureNotice();
-      showPending();
-      try { win.opener.postMessage({type:'ghosting:received',id:pending.record.id},event.origin); } catch {}
-      status('workspace-status', autoSave ? '원래 화면에서 요청한 기록을 비공개로 저장하고 있어요.' : '움직임을 받았어요. 아래 내용을 확인한 뒤 저장해주세요.');
-      if (autoSave) await saveCapture();
+      remember(capture);acknowledge('ghosting:received',capture);
+      if(pending && pending.record.id===record.id && revision<=revisionValue(pending.record))return;
+      const queued=inbox.get(record.id);
+      if(queued && revision<=revisionValue(queued.record))return;
+      capture.video ||= queued?.video || (pending?.record.id===record.id ? pending.video : null);
+      if(saving){inbox.set(record.id,capture);return;}
+      if(pending && pending.record.id!==record.id){inbox.set(record.id,capture);return;}
+      pending=capture;updateCaptureNotice();showPending();
+      status('workspace-status',autoSave?'영상과 해석을 비공개로 동기화하고 있어요.':'움직임을 받았어요. 아래 내용을 확인한 뒤 저장해주세요.');
+      if(autoSave)await saveCapture();
     }
     async function saveCapture() {
-      if (!authenticated || !pending || saving || actionBusy) return;
-      const capture = pending;
-      const currentEpoch = epoch;
-      saving = true;
-      syncActions();
-      status('detail-status', '원본 영상과 분석 정보를 저장하고 있어요.');
-      try {
-        const body = new win.FormData();
-        body.append('record', JSON.stringify(capture.record));
-        if (capture.video) body.append('video', capture.video, capture.video.type.includes('mp4') ? 'movement.mp4' : 'movement.webm');
-        const result = await request('/api/records', { method: 'POST', body });
-        if (!authenticated || currentEpoch !== epoch) return;
-        const id = text(result.record?.id) || text(result.id);
-        if (!id) throw new Error('저장 확인을 받지 못했어요. 목록을 새로고침해 중복 저장 여부를 확인해주세요.');
-        pending = null;
-        clearVideo();
-        updateCaptureNotice();
-        try { win.opener?.postMessage({ type: 'ghosting:saved', id }, capture.origin); } catch {}
-        saving = false;
-        syncActions();
-        await refreshRecords();
-        await selectRecord(id);
-        status('workspace-status', result.alreadySaved ? '이미 저장된 기록이에요. 기존 영상과 분석 정보를 열었습니다.' : '기록을 저장했어요. 새 영상이 반영되기까지 잠시 걸릴 수 있어요.');
-      } catch (error) {
-        if (authenticated && currentEpoch === epoch) {
-          status('detail-status', `${error.message} 저장 전 데이터는 이 창에 남아 있습니다. 아래 저장 버튼으로 다시 시도해주세요.`, true);
-          try { win.opener?.postMessage({type:'ghosting:error',id:capture.record.id,message:error.message},capture.origin); } catch {}
+      if(!authenticated||!pending||saving||actionBusy)return;
+      const capture=pending,currentEpoch=epoch;
+      saving=true;syncActions();status('detail-status','영상과 분석 정보를 저장하고 있어요.');
+      let completed=false;
+      try{
+        const id=capture.record.id,revision=revisionValue(capture.record);
+        let result;
+        if(storedRevisions.has(id)){
+          result=await updateStoredCapture(id,capture.record);
+        }else{
+          const body=new win.FormData();body.append('record',JSON.stringify(capture.record));
+          if(capture.video)body.append('video',capture.video,capture.video.type.includes('mp4')?'movement.mp4':'movement.webm');
+          result=await request('/api/records',{method:'POST',body});
+          const existingRevision=Number.isSafeInteger(result.revision)?result.revision:0;
+          if(result.alreadySaved && revision>existingRevision)result=await updateStoredCapture(id,capture.record);
         }
-      } finally { saving = false; syncActions(); }
+        if(!authenticated||currentEpoch!==epoch)return;
+        const responseId=text(result.record?.id)||text(result.id);
+        if(responseId!==id)throw new Error('저장 확인 번호가 일치하지 않아요. 목록을 다시 확인해주세요.');
+        const storedRevision=Number.isSafeInteger(result.revision)?result.revision:revision;
+        if(storedRevision<revision)throw new Error('최신 입력의 저장 확인을 받지 못했어요. 다시 시도해주세요.');
+        pending=null;clearVideo();updateCaptureNotice();saved(capture,storedRevision);completed=true;
+        await refreshRecords();
+        const detail=await request('/api/records/'+encodeURIComponent(id));
+        if(authenticated && currentEpoch===epoch && isObject(detail.record))renderDetail(detail.record,false);
+        if(authenticated && currentEpoch===epoch)status('workspace-status',result.alreadySaved?'이미 저장된 기록이에요. 최신 보관 내용을 열었습니다.':'영상과 결과를 비공개로 보관했어요.');
+      }catch(error){
+        if(authenticated&&currentEpoch===epoch){
+          status('detail-status',error.message+' 저장 전 데이터는 이 창과 원래 화면에 남아 있습니다. 다시 시도해주세요.',true);
+          notifyPendingError(error.message,error.code || 'SAVE_FAILED');
+        }
+      }finally{
+        saving=false;syncActions();
+        if(completed && authenticated && currentEpoch===epoch)nextCapture();
+      }
     }
     function confirmAction(title, message, label) {
       $('confirm-heading').textContent = title;
@@ -428,13 +502,14 @@
     }
     async function discardCapture() {
       if (!pending || saving || actionBusy) return;
-      if (!await confirmAction('이 기록의 저장을 취소할까요?', '아직 저장하지 않은 영상과 분석 정보가 이 창에서 사라집니다.', '저장 취소하기')) return;
-      pending = null;
-      hideDetail();
-      updateCaptureNotice();
-      renderList();
+      const capture=pending,currentEpoch=epoch;
+      if (!await confirmAction('이 기록의 저장을 취소할까요?', '아직 저장하지 않은 영상과 분석 정보가 이 창과 원래 화면의 대기 목록에서 사라집니다.', '저장 취소하기')) return;
+      if(!authenticated||currentEpoch!==epoch||pending!==capture||saving||actionBusy)return;
+      pending=null;inbox.delete(capture.record.id);waitingAcks.delete(capture.record.id);
+      hideDetail();updateCaptureNotice();renderList();
       status('workspace-status', '저장 전 기록을 지웠어요. 원래 화면에서 새 기록을 보낼 수 있습니다.');
-      announceReady();
+      acknowledge('ghosting:discarded',capture);
+      announceReady();nextCapture();
     }
     async function deleteRecord(explicitRecord) {
       const record = explicitRecord?.id ? explicitRecord : selectedIsPending ? null : selected;
@@ -447,6 +522,7 @@
       try {
         await request(`/api/records/${encodeURIComponent(record.id)}`, { method: 'DELETE' });
         if (!authenticated || currentEpoch !== epoch) return;
+        markDeleted(record.id);
         if (!selectedIsPending && selected?.id === record.id) hideDetail();
         await refreshRecords();
         status('workspace-status', '기록과 영상을 삭제했어요.');
@@ -482,6 +558,8 @@
       } finally { actionBusy = false; syncActions(); }
     }
     function start() {
+      const home=doc.querySelector?.('.site-header .brand');
+      if(home&&captureMode)home.setAttribute('href','/logs/'+win.location.search);
       $('login-form').addEventListener('submit', async event => {
         event.preventDefault();
         if ($('login-submit').disabled) return;
@@ -498,7 +576,8 @@
         $('logout').disabled = true;
         try {
           await request('/api/logout', { method: 'POST' });
-          pending = null;
+          notifyPendingError('로그아웃했어요. 원래 화면에 보관한 기록은 다시 로그인하면 동기화할 수 있어요.');
+          pending = null;inbox.clear();waitingAcks.clear();
           lock('로그아웃했어요.');
         } catch (error) {
           if (error.status === 401) pending = null;

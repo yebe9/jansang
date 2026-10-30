@@ -1,0 +1,68 @@
+{
+  "model": "OpenMotionLab/MotionGPT-base",
+  "checkpointRevision": "a0a37a388137f15df8299c643a885a42b07772fe",
+  "weightsLicense": "Official model card says cc without naming a Creative Commons variant. The MIT code license must not be assumed for weights. Checkpoints remain local and are excluded from distribution.",
+  "totalBytes": 2326176467,
+  "files": [
+    {
+      "path": "motiongpt_s3_h3d.tar",
+      "url": "https://huggingface.co/OpenMotionLab/MotionGPT-base/resolve/a0a37a388137f15df8299c643a885a42b07772fe/motiongpt_s3_h3d.tar",
+      "bytes": 1332604933,
+      "sha256": "0d8a9e1a0c3bd15ed2d2160a22abe3edef299920eb9565a7e9decf1da4c8e79c"
+    },
+    {
+      "path": "flan-t5-base/model.safetensors",
+      "url": "https://huggingface.co/google/flan-t5-base/resolve/7bcac572ce56db69c1ea7c8af255c5d7c9672fc2/model.safetensors",
+      "bytes": 990345061,
+      "sha256": "1dfb70afdcedceb9f9fae2f9b68e004ad934361fb35b9b2bd50b45ea90790fc8"
+    },
+    {
+      "path": "flan-t5-base/config.json",
+      "url": "https://huggingface.co/google/flan-t5-base/resolve/7bcac572ce56db69c1ea7c8af255c5d7c9672fc2/config.json",
+      "bytes": 1404,
+      "sha256": "7c1853dbfa0e4aac093eb109a358b6ab25fe86b7c15185a91322f0ed26f0f940"
+    },
+    {
+      "path": "flan-t5-base/generation_config.json",
+      "url": "https://huggingface.co/google/flan-t5-base/resolve/7bcac572ce56db69c1ea7c8af255c5d7c9672fc2/generation_config.json",
+      "bytes": 147,
+      "sha256": "f5a1c7e2be8092018d8835128987edf0111637dd98e90599cc80310fef75d95a"
+    },
+    {
+      "path": "flan-t5-base/special_tokens_map.json",
+      "url": "https://huggingface.co/google/flan-t5-base/resolve/7bcac572ce56db69c1ea7c8af255c5d7c9672fc2/special_tokens_map.json",
+      "bytes": 2201,
+      "sha256": "5c87151ef0f72a99d1f766a4c418bd2a1f90aaa30a8e22fe5eca9641daebb64f"
+    },
+    {
+      "path": "flan-t5-base/spiece.model",
+      "url": "https://huggingface.co/google/flan-t5-base/resolve/7bcac572ce56db69c1ea7c8af255c5d7c9672fc2/spiece.model",
+      "bytes": 791656,
+      "sha256": "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86"
+    },
+    {
+      "path": "flan-t5-base/tokenizer.json",
+      "url": "https://huggingface.co/google/flan-t5-base/resolve/7bcac572ce56db69c1ea7c8af255c5d7c9672fc2/tokenizer.json",
+      "bytes": 2424064,
+      "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a"
+    },
+    {
+      "path": "flan-t5-base/tokenizer_config.json",
+      "url": "https://huggingface.co/google/flan-t5-base/resolve/7bcac572ce56db69c1ea7c8af255c5d7c9672fc2/tokenizer_config.json",
+      "bytes": 2537,
+      "sha256": "4c55124402e4ce48c7125d04b9af152a125eda9e7c80829f8f99f2ec69f3f68d"
+    },
+    {
+      "path": "meta/mean.npy",
+      "url": "https://huggingface.co/spaces/OpenMotionLab/MotionGPT/resolve/89e4bf56c6da6896b2bb13bb700c72803872d7d8/assets/meta/mean.npy",
+      "bytes": 2232,
+      "sha256": "0bdb5ba69a3a9e34d71990db15bc535ebc024c8d95ddb5574196f96058faa7d3"
+    },
+    {
+      "path": "meta/std.npy",
+      "url": "https://huggingface.co/spaces/OpenMotionLab/MotionGPT/resolve/89e4bf56c6da6896b2bb13bb700c72803872d7d8/assets/meta/std.npy",
+      "bytes": 2232,
+      "sha256": "6a5f7d60301c9465972fc225f8ad0ee8f957e7720431189123eb6d15873a9557"
+    }
+  ]
+}

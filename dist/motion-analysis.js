@@ -70,7 +70,9 @@
           if (point) joints[name] = point;
         }
         const segment = Number.isSafeInteger(frame.segment) && frame.segment >= 0 ? frame.segment : 0;
-        return { t: frame.t, joints, segment };
+        const worldJoints={};
+        for(const name of JOINTS){const xyz=frame.worldJoints?.[name];if(Array.isArray(xyz)&&xyz.length===3&&xyz.every(v=>finite(v)&&Math.abs(v)<=20))worldJoints[name]=[...xyz];}
+        return {t:frame.t,joints,segment,...(Object.keys(worldJoints).length?{worldJoints}: {})};
       })
       .sort((a, b) => a.t - b.t);
   }
@@ -413,7 +415,8 @@
       }
       const joints = {};
       for (const [name, point] of Object.entries(frame.joints)) joints[name] = point.map((value) => round(value));
-      return { t: Math.min(durationMs, round(frame.t, 3)), joints, segment: frame.segment };
+      return {t:Math.min(durationMs,round(frame.t,3)),joints,segment:frame.segment,
+        ...(frame.worldJoints?{worldJoints:Object.fromEntries(Object.entries(frame.worldJoints).map(([name,xyz])=>[name,xyz.map(v=>round(v))]))}: {})};
     });
     const payload = { source, durationMs, captureAspect: aspect, sampleCount: sampleData.length, metrics, samples };
     if (source === 'hand') payload.handTarget = handTarget;

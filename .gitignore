@@ -10,3 +10,10 @@ preview.png
 .dev.vars
 .dev.vars.*
 .wrangler/
+
+# Local CPU models, Python environment, and downloaded source vectors
+.venv-motion/
+.models/
+motion_service/vendor/
+__pycache__/
+*.pyc

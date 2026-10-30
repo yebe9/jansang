@@ -1,5 +1,6 @@
 // Shared by the local Node server and the optional Cloudflare Worker.
 // Only numeric movement data crosses this boundary. No video or intention text.
+import { requestMotionCaption, MotionCaptionError } from './motiongpt-provider.mjs';
 import { DANCE_VOCABULARY } from './dance-vocabulary.mjs';
 import { encodeMotion, ENCODING_GUIDE } from './motion-encoding.mjs';
 import { evaluateExpressionRubric, VISUAL_DEFINITIONS } from './expression-rubric.mjs';
@@ -45,7 +46,7 @@ const OUTPUT_SCHEMA = {
     observations: { type: 'ARRAY', items: { type: 'STRING', description: '관측 근거 한 문장, 40자 이내' }, minItems: 1, maxItems: 1 },
     qualities: { type: 'ARRAY', items: { type: 'STRING', enum: DANCE_LABELS }, minItems: 1, maxItems: 3 },
     candidates: {
-      type: 'ARRAY', minItems: 1, maxItems: 5,
+      type: 'ARRAY', minItems: 5, maxItems: 5,
       items: {
         type: 'OBJECT',
         properties: {
@@ -61,7 +62,7 @@ const OUTPUT_SCHEMA = {
 };
 
 const SYSTEM_PROMPT = `너는 '잔상(Ghosting)'의 움직임 감상 도우미다. 좌표의 질감·리듬·분위기를 한국어 JSON으로 답한다. impression과 qualities는 스키마 enum의 정확한 표현만 쓰고 qualities는 대표부터 근거 있는 1~3개만 고른다. 감상 1~2문장과 근거 1개를 짧게 쓴다. 감상에 숫자·지표명·점수·진단은 쓰지 않는다.
-50개 정의를 모두 비교하되 다양성을 위해 억지로 바꾸거나 늘 고르는 익숙한 표현으로 채우지 않는다. candidates는 근거가 있는 상위 후보 최대 5개이며 대표를 포함한다. score는 네가 제시하는 비보정 적합도 0~100이다; 확률·내부 logprob·감정 확률이 아니며 합계 100일 필요도 없다. 동점 가능, 대표를 최고점으로 하고 근거는 후보당 25자 이내다. 미보고 후보는 0점이 아니다.
+50개 정의를 모두 비교하되 다양성을 위해 억지로 바꾸거나 늘 고르는 익숙한 표현으로 채우지 않는다. candidates는 근거가 있는 상위 후보 정확히 5개이며 대표를 포함한다. 사용자 의도는 받지 않으며 움직임만 보고 후보를 선정한다. score는 네가 제시하는 비보정 적합도 0~100이다; 확률·내부 logprob·감정 확률이 아니며 합계 100일 필요도 없다. 동점 가능, 대표를 최고점으로 하고 근거는 후보당 25자 이내다. 미보고 후보는 0점이 아니다.
 expressionRubric은 경험적 선택 제한이다. eligible=false인 유연한·유려한은 후보·대표·태그·감상에 쓰지 않는다. 유연한은 전신 관절 굽힘과 펴짐 근거가 필수이고 단순한 곡선·이동·속도만으로 불가하다. 유려한은 장시간의 안정된 속도·방향 연결이 모두 필요하다. eligible=true여도 자동 선택하지 않는다.
 영상·얼굴·음성·사용자 의도는 없다. 실제 감정·정신 상태·의도·성격·건강·정체성은 추론하지 않는다. 감정 어휘는 시각적 비유이며 음악·실력도 단정하지 않는다.
 ${ENCODING_GUIDE}
@@ -136,9 +137,18 @@ export function validateMotion(value) {
         });
         return sample.segment === undefined ? { t: sample.t, hands } : { t: sample.t, hands, segment: sample.segment };
       }
-      if (!onlyKeys(sample, ['t', 'joints', 'segment'])) invalid();
+      if (!onlyKeys(sample, ['t', 'joints', 'segment', 'worldJoints'])) invalid();
       const joints = validateJoints(sample.joints, JOINTS);
-      return sample.segment === undefined ? { t: sample.t, joints } : { t: sample.t, joints, segment: sample.segment };
+      const frame = sample.segment === undefined ? {t:sample.t,joints} : {t:sample.t,joints,segment:sample.segment};
+      if(sample.worldJoints!==undefined){
+        if(!isRecord(sample.worldJoints)||Object.keys(sample.worldJoints).length>JOINTS.size)invalid();
+        frame.worldJoints={};
+        for(const [name,xyz] of Object.entries(sample.worldJoints)){
+          if(!JOINTS.has(name)||!Array.isArray(xyz)||xyz.length!==3||!xyz.every(v=>numberIn(v,-20,20)))invalid();
+          frame.worldJoints[name]=[...xyz];
+        }
+      }
+      return frame;
     }
     if (!onlyKeys(sample, ['t', 'x', 'y', 'stroke']) ||
         !numberIn(sample.x, 0, 1) || !numberIn(sample.y, 0, 1) ||
@@ -380,7 +390,7 @@ export function buildAnalysisRequest(motion, model = DEFAULT_MODEL) {
   return analysisRequest(motion, model, evaluateExpressionRubric(motion));
 }
 
-function analysisRequest(motion, model, rubric) {
+function analysisRequest(motion, model, rubric, motionCaption = null) {
   if (!/^gemini-[a-zA-Z0-9.-]+$/.test(model)) {
     throw new ApiError(503, 'MODEL_CONFIG', '서버의 AI 모델 설정을 확인해 주세요.');
   }
@@ -417,6 +427,7 @@ function analysisRequest(motion, model, rubric) {
     contents: [{ role: 'user', parts: [{ text: JSON.stringify({
       ...encodeMotion(compactMotion(motion)),
       expressionRubric: { version: rubric.version, eligible: rubric.eligible, metrics: rubric.metrics },
+      ...(motionCaption ? {motionCaption:{caption:motionCaption.caption,provider:'MotionGPT',note:'이 실제 MotionGPT 동작 설명을 우선 근거로 인상을 한국어로 표현하되, 관절 재타기팅과 루트 이동 추정의 한계가 있다.'}} : {}),
     }) }] }],
     generationConfig,
   };
@@ -428,7 +439,8 @@ async function analyze(motion, env, fetchImpl, signal, remainingMs, diagnostic) 
     assertActive(signal);
     diagnostic.stage = 'prepare';
     const rubric = evaluateExpressionRubric(motion);
-    const body = JSON.stringify(analysisRequest(motion, model, rubric));
+    const motionCaption = await requestMotionCaption(motion, env, {fetchImpl,signal});
+    const body = JSON.stringify(analysisRequest(motion, model, rubric, motionCaption));
     diagnostic.requestBytes = new TextEncoder().encode(body).byteLength;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     const options = {
@@ -494,7 +506,7 @@ async function analyze(motion, env, fetchImpl, signal, remainingMs, diagnostic) 
       throw new ApiError(502, 'INCOMPLETE_ANALYSIS', 'AI가 분석을 완성하지 못했습니다. 다시 시도해 주세요.');
     }
     const responseText = candidate.content?.parts?.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('');
-    try { return { provider: 'Gemini', model, analysis: readAnalysis(responseText, rubric) }; }
+    try { return { provider: motionCaption ? 'MotionGPT + Gemini' : 'Gemini', model, analysis: readAnalysis(responseText, rubric), ...(motionCaption?{motionCaption}: {}) }; }
     catch {
       if (candidate.finishReason === 'MAX_TOKENS') {
         throw new ApiError(502, 'INCOMPLETE_ANALYSIS', 'AI 응답이 중간에 끝났습니다. 다시 시도해 주세요.');
@@ -503,6 +515,7 @@ async function analyze(motion, env, fetchImpl, signal, remainingMs, diagnostic) 
     }
   } catch (error) {
     if (error instanceof ApiError) throw error;
+    if (error instanceof MotionCaptionError) throw new ApiError(error.status,error.code,error.message);
     if (signal.aborted) throw timedOut();
     throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'AI 서비스 연결에 실패했습니다. 네트워크 상태를 확인해 주세요.');
   }
@@ -521,7 +534,7 @@ export function createLocalLimiter({ limit = 12, periodMs = 60000 } = {}) {
 
 export async function handleApi(request, {
   env = {}, fetchImpl = fetch, checkLimit = async () => true,
-  allowLocal = false, requireOrigin = false, timeoutMs = ANALYSIS_DEADLINE_MS,
+  allowLocal = false, requireOrigin = false, timeoutMs = env.MOTIONGPT_URL ? 180000 : ANALYSIS_DEADLINE_MS,
   onDiagnostic,
 } = {}) {
   const startedAt = Date.now();
@@ -553,7 +566,7 @@ export async function handleApi(request, {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
     if (url.pathname === '/api/status') {
       if (request.method !== 'GET') throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'GET 요청만 가능합니다.');
-      return json(200, { available: Boolean(env.GEMINI_API_KEY?.trim()), provider: 'Gemini', model: env.GEMINI_MODEL || DEFAULT_MODEL });
+      return json(200, { available: Boolean(env.GEMINI_API_KEY?.trim()), provider: env.MOTIONGPT_URL ? 'MotionGPT + Gemini' : 'Gemini', model: env.GEMINI_MODEL || DEFAULT_MODEL });
     }
     if (request.method !== 'POST') throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'POST 요청만 가능합니다.');
     if (!env.GEMINI_API_KEY?.trim()) {

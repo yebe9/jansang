@@ -15,7 +15,7 @@ const example = (id = 'record-one') => ({
   ] },
 });
 
-function harness({ session = true, records = [], fetch: customFetch, capture = true, autoSave = false } = {}) {
+function harness({ session = true, records = [], fetch: customFetch, capture = true, autoSave = false, continuous = false, sessionData = new Map() } = {}) {
   class Element {
     constructor(tagName = 'div', attrs = '') {
       this.tagName = tagName; this.children = []; this.events = new Map(); this.attributes = new Map();
@@ -37,11 +37,14 @@ function harness({ session = true, records = [], fetch: customFetch, capture = t
   }
   const elements = new Map();
   for (const [, tag, attrs, id] of html.matchAll(/<([a-z][\w:-]*)\b([^>]*\bid="([^"]+)"[^>]*)>/gi)) elements.set(id, new Element(tag, attrs));
-  const doc = { getElementById(id) { assert.ok(elements.has(id), `existing HTML element ${id}`); return elements.get(id); }, createElement: tag => new Element(tag), body: new Element('body') };
+  const home=new Element('a');home.setAttribute('href','/');
+  const serverRecords=new Map(records.map(record=>[record.id,{...record}]));
+  const doc = { querySelector(selector){assert.equal(selector,'.site-header .brand');return home;}, getElementById(id) { assert.ok(elements.has(id), `existing HTML element ${id}`); return elements.get(id); }, createElement: tag => new Element(tag), body: new Element('body') };
   const win = new Element('window');
+  win.sessionStorage={getItem:key=>sessionData.get(key)??null,setItem:(key,value)=>sessionData.set(key,String(value))};
   const calls = [], messages = [], createdURLs = [], revokedURLs = [];
   const timers = new Map();
-  win.location = { search: capture ? (autoSave ? '?capture=1&save=1' : '?capture=1') : '' };
+  win.location = { search: capture ? (autoSave ? '?capture=1&save=1'+(continuous?'&auto=1':'') : '?capture=1') : '' };
   win.opener = { postMessage: (message, origin) => messages.push({ message, origin }) };
   Object.assign(win, { Blob, FormData, AbortController });
   win.URL = { createObjectURL(blob) { const url = `blob:test-${createdURLs.length}`; createdURLs.push({ url, blob }); return url; }, revokeObjectURL(url) { revokedURLs.push(url); } };
@@ -51,17 +54,31 @@ function harness({ session = true, records = [], fetch: customFetch, capture = t
     calls.push({ url, options });
     assert.equal(options.credentials, 'same-origin', 'all private requests include same-origin credentials');
     const custom = await customFetch?.(url, options);
-    if (custom) return custom;
+    if (custom) {
+      if(custom.ok && url === '/api/records' && options.method === 'POST') {
+        const record=JSON.parse(options.body.get('record'));serverRecords.set(record.id,{...record,revision:record.revision||0,state:'ready',hasVideo:Boolean(options.body.get('video'))});
+      } else if(custom.ok && url.startsWith('/api/records/') && options.method === 'PUT') {
+        const record=JSON.parse(options.body),previous=serverRecords.get(record.id);serverRecords.set(record.id,{...previous,...record,hasVideo:previous?.hasVideo||false,revision:record.revision||0,state:'ready'});
+      } else if(custom.ok && options.method === 'DELETE') serverRecords.delete(decodeURIComponent(url.split('/')[3]));
+      return custom;
+    }
     if (url === '/api/session') return reply({ authenticated: session }, session ? 200 : 401);
     if (url === '/api/login' || url === '/api/logout') return reply({ ok: true });
-    if (url === '/api/records' && options.method !== 'POST') return reply({ records });
-    if (url.startsWith('/api/records/') && options.method === 'DELETE') return reply({ deleted: true });
-    if (url.startsWith('/api/records/')) return reply({ record: example(decodeURIComponent(url.split('/')[3])) });
+    if (url === '/api/records' && options.method !== 'POST') return reply({ records:[...serverRecords.values()].map(record=>({...record,impression:record.impression||record.analysis?.impression})) });
+    const id=decodeURIComponent(url.split('/')[3]||'');
+    if (url.startsWith('/api/records/') && options.method === 'DELETE') {serverRecords.delete(id);return reply({ deleted:true });}
+    if (url.startsWith('/api/records/') && options.method === 'PUT') {
+      const previous=serverRecords.get(id);if(!previous)return reply({error:{message:'기록을 찾을 수 없어요.'}},404);
+      const input=JSON.parse(options.body),revision=Math.max(previous.revision||0,input.revision||0);
+      if((input.revision||0)>(previous.revision||0))serverRecords.set(id,{...previous,...input,revision});
+      return reply({id,revision,alreadySaved:revision===(previous.revision||0)});
+    }
+    if (url.startsWith('/api/records/')) return reply({ record: serverRecords.get(id) || example(id) });
     throw new Error(`Unmocked fetch ${url}`);
   };
   const app = createApp(win, doc);
   return {
-    win, doc, app, calls, messages, createdURLs, revokedURLs, get: id => elements.get(id),
+    win, doc, app, calls, messages, createdURLs, revokedURLs, home, serverRecords, sessionData, get: id => elements.get(id),
     async capture(record = example(), video = new Blob(['mock video'], { type: 'video/webm' }), extra = {}) {
       await win.dispatch('message', { source: win.opener, origin: 'https://yebe9.github.io', data: { type: 'ghosting:capture', record, video }, ...extra });
     },
@@ -112,7 +129,7 @@ test('save sends reviewed record and video with FormData; successful save replie
   assert.equal(call.options.body.get('video').type, 'video/webm');
   assert.equal(app.get('pending-actions').hidden, true);
   const saved = app.messages.find(item => item.message.type === 'ghosting:saved');
-  assert.deepEqual(saved, { message: { type: 'ghosting:saved', id: 'record-one' }, origin: 'https://yebe9.github.io' });
+  assert.deepEqual(saved, { message: { type: 'ghosting:saved', id: 'record-one',revision:0,storedRevision:0 }, origin: 'https://yebe9.github.io' });
   assert.ok(app.revokedURLs.includes(app.createdURLs[0].url));
 });
 
@@ -299,4 +316,179 @@ test('a capture arriving during login does not retry a failed automatic save beh
   finishList(reply({records:[]})); await starting;
   assert.equal(attempts,1);
   assert.equal(app.get('pending-actions').hidden,false);
+});
+
+
+test('continuous capture saves later revisions with JSON PUT while preserving the first video upload',async()=>{
+ const calls=[];
+ const app=harness({autoSave:true,continuous:true,fetch:(url,options)=>{
+  if(url==='/api/records'&&options.method==='POST'){const record=JSON.parse(options.body.get('record'));return reply({id:record.id,revision:record.revision});}
+  if(url==='/api/records/record-one'&&options.method==='PUT'){calls.push(JSON.parse(options.body));return reply({id:'record-one',revision:JSON.parse(options.body).revision,updated:true});}
+ }});
+ await app.app.start();await app.capture({...example(),revision:1});
+ const latest={...example(),revision:2,intention:'긴장한',details:'후속 입력'};
+ await app.capture(latest,null);
+ assert.equal(app.calls.filter(c=>c.url==='/api/records'&&c.options.method==='POST').length,1);
+ assert.equal(calls.length,1);assert.equal(calls[0].intention,'긴장한');
+ const update=app.calls.find(c=>c.options.method==='PUT');
+ assert.equal(update.options.headers['Content-Type'],'application/json');
+ assert.equal(app.messages.filter(m=>m.message.type==='ghosting:saved').at(-1).message.revision,2);
+});
+
+test('queued newer revisions are serialized and coalesced without discarding earlier receipt acknowledgements',async()=>{
+ let finish;const first=new Promise(resolve=>{finish=resolve;});const updates=[];
+ const app=harness({autoSave:true,continuous:true,fetch:(url,options)=>{
+  if(url==='/api/records'&&options.method==='POST')return first;
+  if(options.method==='PUT'){const record=JSON.parse(options.body);updates.push(record.revision);return reply({id:record.id,revision:record.revision});}
+ }});
+ await app.app.start();const saving=app.capture({...example(),revision:1});await flush();
+ await app.capture({...example(),revision:2},null);await app.capture({...example(),revision:2},null);await app.capture({...example(),revision:3},null);
+ assert.equal(updates.length,0,'No overlapping metadata write during video upload');
+ finish(reply({id:'record-one',revision:1}));await saving;for(let n=0;n<5;n++)await flush();
+ assert.deepEqual(updates,[3]);
+ const saved=app.messages.filter(m=>m.message.type==='ghosting:saved').map(m=>m.message.revision);
+ assert.deepEqual(saved,[1,2,3]);
+ assert.ok(app.messages.filter(m=>m.message.type==='ghosting:received').every(m=>Number.isSafeInteger(m.message.revision)));
+});
+
+test('continuous mode accepts the next movement after finishing the previous one',async()=>{
+ const app=harness({autoSave:true,continuous:true,fetch:(url,options)=>{
+  if(url==='/api/records'&&options.method==='POST'){const record=JSON.parse(options.body.get('record'));return reply({id:record.id,revision:record.revision});}
+ }});
+ await app.app.start();await app.capture({...example(),revision:1},null);await app.capture({...example('record-two'),revision:1},null);
+ assert.equal(app.calls.filter(c=>c.url==='/api/records'&&c.options.method==='POST').length,2);
+ assert.deepEqual(app.messages.filter(m=>m.message.type==='ghosting:saved').map(m=>m.message.id),['record-one','record-two']);
+});
+
+test('a restored draft with an existing remote ID upgrades metadata without reuploading its video',async()=>{
+ let put;
+ const app=harness({autoSave:true,continuous:true,fetch:(url,options)=>{
+  if(url==='/api/records'&&options.method==='POST')return reply({id:'record-one',revision:1,alreadySaved:true});
+  if(options.method==='PUT'){put=JSON.parse(options.body);return reply({id:'record-one',revision:3});}
+ }});
+ await app.app.start();await app.capture({...example(),revision:3,intention:'새 느낌'},null);
+ assert.equal(put.intention,'새 느낌');
+ assert.ok(app.messages.some(m=>m.message.type==='ghosting:saved'&&m.message.revision===3));
+});
+
+test('session expiry and logout report exact pending revisions to the durable parent queue',async()=>{
+ const app=harness({autoSave:true,continuous:true,fetch:(url,options)=>url==='/api/records'&&options.method==='POST'?reply({},401):undefined});
+ await app.app.start();await app.capture({...example(),revision:5},null);
+ const failure=app.messages.find(m=>m.message.type==='ghosting:error');
+ assert.equal(failure.message.id,'record-one');assert.equal(failure.message.revision,5);assert.equal(failure.message.code,'LOGIN_REQUIRED');
+ assert.equal(app.get('workspace').hidden,true);
+});
+
+test('semantic similarities keep negative values and model provenance distinct from legacy fit scores',async()=>{
+ const app=harness();await app.app.start();
+ const record={...example(),revision:2,similarity:{method:'fasttext-cosine',model:'cc.ko.300',results:[{label:'단호한',similarity:-23.5,rawCosine:-.235,evidence:'단어 벡터 비교'}]}};
+ await app.capture(record,null);
+ assert.match(app.get('candidates-heading').textContent,/의미 유사도/);
+ assert.equal(app.get('candidate-scale').textContent,'코사인 × 100');assert.match(app.get('similarity-provenance').textContent,/cc.ko.300/);
+ const row=app.get('candidate-list').children[0];assert.match(row.children[0].textContent,/-23.5/);
+ assert.equal(row.children[1].getAttribute('aria-valuemin'),'-100');assert.equal(row.children[1].getAttribute('aria-valuenow'),'-23.5');
+ assert.equal(row.children[1].children[1].style.width,'11.75%');
+});
+
+
+test('logging in with a previously stored take updates metadata directly without resending a video',async()=>{
+ const app=harness({autoSave:true,continuous:true,records:[{...example(),revision:2,state:'ready'}],fetch:(url,options)=>{
+  if(options.method==='PUT')return reply({id:'record-one',revision:3});
+ }});
+ await app.app.start();await app.capture({...example(),revision:3});
+ assert.equal(app.calls.filter(c=>c.url==='/api/records'&&c.options.method==='POST').length,0);
+ assert.equal(app.calls.filter(c=>c.options.method==='PUT').length,1);
+ assert.ok(app.messages.some(m=>m.message.type==='ghosting:saved'&&m.message.revision===3));
+});
+
+
+test('the logo preserves capture, save and continuous mode when reopening the log page',async()=>{
+ const capture=harness({autoSave:true,continuous:true});await capture.app.start();
+ assert.equal(capture.home.getAttribute('href'),'/logs/?capture=1&save=1&auto=1');
+ const ordinary=harness({capture:false});await ordinary.app.start();assert.equal(ordinary.home.getAttribute('href'),'/');
+});
+
+test('a cached stored revision does not send a saved acknowledgement until the server verifies it',async()=>{
+ let finish;const response=new Promise(resolve=>{finish=resolve;});
+ const app=harness({autoSave:true,continuous:true,records:[{...example(),revision:4,state:'ready'}],fetch:(_url,options)=>options.method==='PUT'?response:undefined});
+ await app.app.start();const receiving=app.capture({...example(),revision:3},null);await flush();
+ assert.equal(app.calls.filter(call=>call.options.method==='PUT').length,1);
+ assert.equal(app.messages.some(item=>item.message.type==='ghosting:saved'),false);
+ finish(reply({id:'record-one',revision:4,alreadySaved:true}));await receiving;
+ const saved=app.messages.find(item=>item.message.type==='ghosting:saved');
+ assert.equal(saved.message.revision,3);assert.equal(saved.message.storedRevision,4);
+});
+
+test('deleting a record prevents later automatic captures from recreating it and reports the exact revision',async()=>{
+ const app=harness({autoSave:true,continuous:true,records:[{...example(),revision:2,state:'ready'}]});
+ await app.app.start();await app.selectFirst();
+ const deleting=app.get('delete-record').click();await flush();await app.get('confirm-accept').click();await deleting;
+ const writes=app.calls.filter(call=>['POST','PUT'].includes(call.options.method)).length;
+ await app.capture({...example(),revision:3},null);
+ assert.equal(app.calls.filter(call=>['POST','PUT'].includes(call.options.method)).length,writes);
+ assert.equal(app.serverRecords.has('record-one'),false);
+ const error=app.messages.filter(item=>item.message.type==='ghosting:error').at(-1);
+ assert.equal(error.message.id,'record-one');assert.equal(error.message.revision,3);assert.equal(error.message.code,'RECORD_DELETED');
+ assert.match(error.message.message,/삭제한 움직임/);
+ assert.equal(app.messages.some(item=>item.message.type==='ghosting:saved'),false);
+});
+
+test('a missing remote record on PUT becomes an explicit deletion error without a POST fallback',async()=>{
+ const app=harness({autoSave:true,continuous:true,records:[{...example(),revision:1,state:'ready'}],fetch:(_url,options)=>options.method==='PUT'?reply({error:{message:'기록을 찾을 수 없어요.'}},404):undefined});
+ await app.app.start();await app.capture({...example(),revision:2},null);await app.capture({...example(),revision:3},null);
+ assert.equal(app.calls.filter(call=>call.options.method==='PUT').length,1);
+ assert.equal(app.calls.some(call=>call.url==='/api/records'&&call.options.method==='POST'),false);
+ const failures=app.messages.filter(item=>item.message.type==='ghosting:error');
+ assert.deepEqual(failures.map(item=>item.message.revision),[2,3]);assert.ok(failures.every(item=>item.message.code==='RECORD_DELETED'));
+ assert.equal(app.messages.some(item=>item.message.type==='ghosting:saved'),false);
+});
+
+test('refreshing a list after deletion evicts stale revision caches instead of acknowledging a missing record',async()=>{
+ const app=harness({autoSave:true,continuous:true,records:[{...example(),revision:3,state:'ready'}]});await app.app.start();
+ app.serverRecords.delete('record-one');await app.get('refresh').click();
+ await app.capture({...example(),revision:2},null);
+ assert.equal(app.calls.some(call=>['POST','PUT'].includes(call.options.method)),false);
+ assert.equal(app.messages.some(item=>item.message.type==='ghosting:saved'),false);
+ assert.ok(app.messages.some(item=>item.message.type==='ghosting:error'&&item.message.code==='RECORD_DELETED'));
+});
+
+test('the same log window remembers explicit deletions across a page reload',async()=>{
+ const sessionData=new Map();
+ const app=harness({autoSave:true,continuous:true,sessionData,records:[{...example(),revision:2,state:'ready'}]});
+ await app.app.start();await app.selectFirst();const deleting=app.get('delete-record').click();await flush();await app.get('confirm-accept').click();await deleting;
+ const reloaded=harness({autoSave:true,continuous:true,sessionData});await reloaded.app.start();
+ await reloaded.capture({...example(),revision:3},null);
+ assert.equal(reloaded.calls.some(call=>['POST','PUT'].includes(call.options.method)),false);
+ assert.ok(reloaded.messages.some(item=>item.message.type==='ghosting:error'&&item.message.id==='record-one'&&item.message.revision===3));
+});
+
+
+test('a confirmed discard reports the exact pending revision only to its trusted parent',async()=>{
+ const app=harness({autoSave:true,continuous:true,fetch:(url,options)=>url==='/api/records'&&options.method==='POST'?reply({error:{message:'일시 저장 실패'}},503):undefined});
+ await app.app.start();await app.capture({...example(),revision:5},null);
+ const cancelling=app.get('discard-capture').click();await flush();
+ assert.equal(app.messages.some(item=>item.message.type==='ghosting:discarded'),false);
+ await app.get('confirm-accept').click();await cancelling;
+ const cancelled=app.messages.filter(item=>item.message.type==='ghosting:discarded');
+ assert.deepEqual(cancelled,[{message:{type:'ghosting:discarded',id:'record-one',revision:5},origin:'https://yebe9.github.io'}]);
+ assert.equal(app.get('record-detail').hidden,true);
+ let prevented=false;await app.win.dispatch('beforeunload',{preventDefault(){prevented=true;}});assert.equal(prevented,false);
+ assert.equal(app.messages.some(item=>item.message.type==='ghosting:saved'),false);
+});
+
+test('dismissing the discard confirmation retains the pending video and sends no cancellation',async()=>{
+ const app=harness();await app.app.start();await app.capture({...example(),revision:2});
+ const cancelling=app.get('discard-capture').click();await flush();await app.get('confirm-cancel').click();await cancelling;
+ assert.equal(app.get('record-detail').hidden,false);assert.equal(app.get('pending-actions').hidden,false);
+ assert.equal(app.messages.some(item=>item.message.type==='ghosting:discarded'),false);
+});
+
+test('a stale discard confirmation cannot discard a newer pending revision',async()=>{
+ const app=harness({autoSave:true,continuous:true,fetch:(url,options)=>url==='/api/records'&&options.method==='POST'?reply({error:{message:'일시 저장 실패'}},503):undefined});
+ await app.app.start();await app.capture({...example(),revision:1},null);
+ const cancelling=app.get('discard-capture').click();await flush();
+ await app.capture({...example(),revision:2,intention:'최근 입력'},null);
+ await app.get('confirm-accept').click();await cancelling;
+ assert.equal(app.messages.some(item=>item.message.type==='ghosting:discarded'),false);
+ assert.equal(app.get('detail-intention').textContent,'최근 입력');assert.equal(app.get('pending-actions').hidden,false);
 });

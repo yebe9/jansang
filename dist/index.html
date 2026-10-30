@@ -6,12 +6,14 @@
   <meta name="theme-color" content="#111b20">
   <meta name="description" content="10초의 움직임이 하나의 잔상으로. 움직임을 그리고, 멈추고, 다시 바라보는 WebGL 실험.">
   <title>잔상:Ghosting - 움직임을 남기는 방법</title>
-  <link rel="stylesheet" href="./styles.css?v=20261022-title-korean">
-  <script src="./config.js?v=20261022-log-recovery" defer></script>
-  <script src="./pose-camera.js?v=20261022-log-recovery" defer></script>
-  <script src="./motion-analysis.js?v=20261022-log-recovery" defer></script>
-  <script src="./session-recorder.js?v=20261022-log-recovery" defer></script>
-  <script src="./app.js?v=20261022-log-recovery" defer></script>
+  <link rel="stylesheet" href="./styles.css?v=20261030-develop">
+  <script src="./config.js?v=20261030-develop" defer></script>
+  <script src="./pose-camera.js?v=20261030-develop" defer></script>
+  <script src="./motion-analysis.js?v=20261030-develop" defer></script>
+  <script src="./session-recorder.js?v=20261030-develop" defer></script>
+  <script src="./private-log-client.js?v=20261030-develop" defer></script>
+  <script src="./semantic-similarity.js?v=20261030-develop" defer></script>
+  <script src="./app.js?v=20261030-develop" defer></script>
 </head>
 <body data-view="intro">
   <header class="header">
@@ -46,16 +48,21 @@
       <p class="eyebrow">03 / A MOMENT TO FEEL</p>
       <h1 id="result-title" tabindex="-1">내가 담은 느낌, <br>다르게 읽힐까요?</h1>
       <p class="result-copy">이 움직임에 어떤 느낌을 담으려 했나요?<br>움직임에서 읽힌 인상과 나란히 놓아보세요.</p>
-      <div class="intent-heading"><label for="intent-short">내가 의도한 느낌</label><span id="intent-count">0 / 5</span></div>
-      <input type="text" id="intent-short" autocomplete="off" placeholder="예: 유연한" aria-describedby="intent-limit feeling-note">
-      <p id="intent-limit">다섯 글자로 남겨주세요. 긴 표현은 아래 메모에 함께 보관해요.</p>
-      <div class="feelings" role="group" aria-label="내가 의도한 느낌"><button aria-pressed="false" data-feeling="유연한"><span>≈</span> 유연한</button><button aria-pressed="false" data-feeling="빠른"><span>↝</span> 빠른</button><button aria-pressed="false" data-feeling="초조한"><span>∿</span> 초조한</button><button aria-pressed="false" data-feeling="경쾌한"><span>✳</span> 경쾌한</button><button aria-pressed="false" data-feeling="날카로운"><span>↗</span> 날카로운</button><button aria-pressed="false" data-feeling="차분한"><span>—</span> 차분한</button></div>
-      <label class="intent-detail-label" for="intent-detail">나만의 말로 덧붙이기 <span>선택</span></label>
-      <textarea id="intent-detail" rows="2" autocomplete="off" placeholder="예: 망설이다가 용기를 내는 느낌" aria-describedby="feeling-note"></textarea>
-      <p id="feeling-note" aria-live="polite">직접 적거나 표현을 골라주세요. 로그 저장 전까지 이 화면에만 남습니다.</p>
+      <div class="intent-fields">
+        <div class="intent-field">
+          <div class="intent-heading"><label for="intent-short">내가 의도한 느낌</label><span id="intent-count">0 / 5</span></div>
+          <input type="text" id="intent-short" autocomplete="off" placeholder="느낌을 다섯 글자로" aria-describedby="intent-examples feeling-note">
+          <p class="feeling-examples" id="intent-examples"><span>유연한</span><span>빠른</span><span>경쾌한</span><span>초조한</span><span>날카로운</span><span>차분한</span></p>
+        </div>
+        <div class="intent-field">
+          <div class="intent-heading"><label for="intent-detail">나만의 말로 덧붙이기</label><span class="intent-field-hint">자유롭게</span></div>
+          <textarea id="intent-detail" rows="3" autocomplete="off" placeholder="이 움직임에 담고 싶었던 이야기를 적어주세요." aria-describedby="feeling-note"></textarea>
+        </div>
+      </div>
+      <p id="feeling-note" aria-live="polite">두 가지 방식 중 편한 말로 움직임의 의도를 남겨보세요.</p>
 
       <section class="interpretation" aria-labelledby="comparison-title">
-        <div class="comparison-heading"><h2 id="comparison-title">의도와 해석 사이</h2><span class="preview-badge" id="analysis-badge">분석 대기</span></div>
+        <div class="comparison-heading"><h2 id="comparison-title">의도와 해석 사이</h2></div>
         <div class="comparison-cards">
           <article class="comparison-card"><p class="card-label">01 / MY INTENTION</p><h3>나의 의도</h3><strong id="intent-word">선택 전</strong><p id="intent-summary">표현하려던 느낌을 위에서 남겨주세요.</p></article>
           <article class="comparison-card ai-card"><p class="card-label" id="reading-label">02 / AI READING</p><h3 id="reading-title">AI가 느낀 움직임</h3><strong id="ai-word">해석 대기</strong><div id="analysis-qualities" class="quality-tags" aria-label="움직임의 표현어"></div><p id="ai-summary">AI가 생성한 해석을 여기서 확인할 수 있어요.</p></article>
@@ -65,26 +72,17 @@
           <summary>어떤 움직임에서 그렇게 느꼈을까요?</summary>
           <ul id="analysis-observations"></ul>
         </details>
-        <details class="analysis-evidence candidate-evidence" id="analysis-candidates" hidden>
-          <summary>AI가 떠올린 표현 후보 TOP 5</summary>
-          <p>AI가 제시한 표현의 적합도입니다. 감정의 확률이나 객관적인 측정값은 아닙니다.</p>
-          <ol id="candidate-list"></ol>
-        </details>
-        <p id="analysis-caveat"></p>
-        <button class="demo-toggle" id="analyze-button">AI로 움직임 해석하기 <span aria-hidden="true">↗</span></button>
-        <div class="comparison-insight" role="status"><strong id="comparison-verdict">내 의도를 먼저 남겨보세요.</strong><p id="comparison-explanation">움직임의 어느 부분이 그 느낌을 전했을까요?</p></div>
-        <p class="comparison-footnote">AI는 기록된 움직임의 좌표를 읽습니다. ‘초조한’ 등의 말은 움직임에서 받은 인상이며, 사람의 실제 감정이 아닙니다. 내 의도는 AI에게 보내지 않습니다.</p>
+        <section class="candidate-evidence similarity-results" id="analysis-candidates" aria-labelledby="similarity-title" hidden>
+          <h3 id="similarity-title">내 표현과 닮은 인상 TOP 5</h3>
+          <p class="similarity-status" id="similarity-status" role="status">의도를 남기면 움직임에서 읽힌 표현과의 유사도를 살펴볼 수 있어요.</p>
+          <div class="similarity-scale" aria-hidden="true"><span>−100</span><span>0</span><span>100</span></div>
+          <ol id="candidate-list" class="similarity-list"></ol>
+        </section>
+        <button class="demo-toggle analysis-retry" id="analyze-button" hidden>해석 다시 시도하기 <span aria-hidden="true">↗</span></button>
       </section>
       <div class="trace-stats"><span><b id="result-duration">10.0</b> 초의 움직임</span><span><b id="result-strokes">1</b> 개의 획</span></div>
-      <section class="private-log" aria-labelledby="log-save-title">
-        <h2 id="log-save-title">이번 움직임 보관</h2>
-        <p id="video-status">영상 보관을 선택하지 않았어요. 의도와 AI 결과만 저장할 수 있습니다.</p>
-        <button id="save-log" class="save-log">비공개 로그에 저장 <span aria-hidden="true">↗</span></button>
-        <p id="log-save-status" role="status"></p>
-        <small>저장을 누르면 로그 창이 열리고, 로그인 후 의도·결과와 선택한 영상이 바로 저장됩니다. 저장 완료 표시를 확인해 주세요. AI에는 영상이나 내 의도를 보내지 않습니다.</small>
-      </section>
+      <div class="auto-save-meta"><p class="auto-save-status" id="auto-save-status" role="status">움직임을 이 기기에 자동 보관합니다.</p><button id="log-connect" class="text-button log-connect" hidden>개인 기록함에 연결 ↗</button></div>
       <div class="result-actions"><button class="primary" id="restart">새로운 움직임 만들기 <span aria-hidden="true">↗</span></button><button class="text-button" id="export">↓ 잔상 이미지 저장</button></div>
-      <p class="privacy-note">AI 해석에는 움직임 좌표만 Google로 전송됩니다. 영상은 보관을 선택한 경우 이 기기에 임시 보관되며, ‘비공개 로그에 저장’을 누를 때만 로그 서버로 보냅니다. 무료 AI의 입력·출력은 서비스 개선에 사용될 수 있습니다.</p>
     </aside>
   </main>
 
@@ -166,12 +164,11 @@
       <button id="input-webcam" aria-pressed="false"><span aria-hidden="true">◎</span><strong>몸으로 남기기</strong><small>웹캠 · 전신 춤 인식</small></button>
     </div>
     <p class="input-help" id="input-help">양손을 함께 보여주세요. 각 손의 검지 끝 또는 손목으로 공중에 그립니다.</p>
-    <label class="ai-consent"><input id="ai-consent" type="checkbox" checked><span>기록 후 AI로 인상 해석하기<small>영상과 내 의도 없이 움직임 좌표만 Google로 전송합니다. 해제하면 자동으로 보내지 않아요. 무료 Gemini의 입력·출력은 서비스 개선에 사용될 수 있습니다.</small></span></label>
-    <label class="ai-consent video-consent"><input id="video-consent" type="checkbox"><span>이번 움직임의 영상도 보관<small>소리 없이 원본 카메라 영상을 보관합니다. 얼굴이나 주변이 포함될 수 있어요. 결과에서 저장을 눌러야 온라인 비공개 로그로 전송됩니다.</small></span></label>
     <p id="dialog-error" class="dialog-error" hidden>WebGL을 사용할 수 없어 시작할 수 없습니다.<br>브라우저 설정을 확인하고 새로고침해 주세요.</p>
     <button class="primary" id="start" autofocus>웹캠 준비하기 <span aria-hidden="true">↗</span></button>
     <button class="text-button" id="example">예시 먼저 보기</button>
-    <p class="dialog-footnote">10초의 움직임 · 잠깐 멈춤 · 서로 다른 해석</p>
+    <p class="dialog-footnote">10초 기록 · 자동 해석 · 비공개 보관</p>
+    <p class="capture-note">시작하면 소리 없는 영상과 분석 기록을 비공개로 자동 보관합니다.</p>
   </dialog>
   <div class="sr-only" id="announcement" role="status" aria-live="polite"></div>
 </body>
