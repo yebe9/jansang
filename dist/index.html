@@ -9,11 +9,11 @@
   <link rel="stylesheet" href="./styles.css?v=20261030-develop">
   <script src="./config.js?v=20261030-develop" defer></script>
   <script src="./pose-camera.js?v=20261030-develop" defer></script>
-  <script src="./motion-analysis.js?v=20261030-develop" defer></script>
+  <script src="./motion-analysis.js?v=20261030-motion-v2" defer></script>
   <script src="./session-recorder.js?v=20261030-develop" defer></script>
   <script src="./private-log-client.js?v=20261030-develop" defer></script>
   <script src="./semantic-similarity.js?v=20261030-develop" defer></script>
-  <script src="./app.js?v=20261030-develop" defer></script>
+  <script src="./app.js?v=20261030-motion-v2" defer></script>
 </head>
 <body data-view="intro">
   <header class="header">
@@ -73,8 +73,8 @@
           <ul id="analysis-observations"></ul>
         </details>
         <section class="candidate-evidence similarity-results" id="analysis-candidates" aria-labelledby="similarity-title" hidden>
-          <h3 id="similarity-title">내 표현과 닮은 인상 TOP 5</h3>
-          <p class="similarity-status" id="similarity-status" role="status">의도를 남기면 움직임에서 읽힌 표현과의 유사도를 살펴볼 수 있어요.</p>
+          <h3 id="similarity-title">AI 해석 결과 TOP 5</h3>
+          <p class="similarity-status" id="similarity-status" role="status">움직임만 보고 AI가 고른 순서입니다. 내 의도와 의미 유사도는 각 표현 옆에 표시됩니다.</p>
           <div class="similarity-scale" aria-hidden="true"><span>−100</span><span>0</span><span>100</span></div>
           <ol id="candidate-list" class="similarity-list"></ol>
         </section>

@@ -138,8 +138,12 @@ export function validateRecord(raw) {
       method:text(similarity.method,100),model:text(similarity.model,300),
       results:similarity.results.map(item=>{
         if (!plain(item)) fail(400,'INVALID_RECORD','유사도 후보 형식을 확인해 주세요.');
-        const result={label:text(item.label,100),similarity:finite(item.similarity,-100,100),evidence:text(item.evidence,1000,true)};
-        if (item.rawCosine !== undefined) result.rawCosine=finite(item.rawCosine,-1,1);
+        const result={label:text(item.label,100),similarity:item.similarity===null?null:finite(item.similarity,-100,100),evidence:text(item.evidence,1000,true)};
+        if(item.aiRank!==undefined){
+          if(!Number.isInteger(item.aiRank)||item.aiRank<1||item.aiRank>5)fail(400,'INVALID_RECORD','AI 순위는 1부터 5까지의 정수여야 합니다.');
+          result.aiRank=item.aiRank;
+        }
+        if (item.rawCosine !== undefined) result.rawCosine=item.rawCosine===null?null:finite(item.rawCosine,-1,1);
         return result;
       })
     };

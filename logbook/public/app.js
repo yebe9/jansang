@@ -290,23 +290,25 @@
     }
     function renderCandidates(candidates,similarity) {
       const semantic=isObject(similarity)&&Array.isArray(similarity.results);
-      if(semantic)candidates=similarity.results;
-      $('candidates-heading').textContent=semantic?'내 의도와 표현의 의미 유사도':'AI가 함께 제시한 표현';
+      const semanticByLabel=new Map(semantic?similarity.results.map(item=>[item?.label,item]):[]);
+      if(!Array.isArray(candidates)||!candidates.length)candidates=semantic?similarity.results.slice().sort((a,b)=>(a.aiRank||51)-(b.aiRank||51)):[];
+      $('candidates-heading').textContent='AI 해석 결과 TOP 5';
       $('candidate-scale').textContent=semantic?'코사인 × 100':'AI 적합도 / 100';
-      $('candidate-description').textContent=semantic?'내가 남긴 말과 각 표현을 단어 벡터로 비교한 의미 유사도입니다. 감정의 확률이나 동작 일치율이 아닙니다. 음수는 벡터 방향이 반대임을 뜻합니다.':'각 수치는 AI가 스스로 보고한 표현의 적합도입니다. 확률·정확도·모델 내부의 실제 후보 순위가 아닙니다. 보고하지 않은 수치는 0으로 표시하지 않습니다.';
+      $('candidate-description').textContent=semantic?'순서는 움직임만 보고 AI가 고른 순서입니다. 각 수치는 내 의도와 의미 유사도(단어 벡터 코사인 × 100)입니다. 감정의 확률이나 동작 일치율이 아닙니다. 측정할 수 없는 표현도 그대로 남깁니다.':'움직임만 보고 AI가 고른 순서입니다. 각 수치는 AI가 스스로 보고한 표현의 적합도이며 확률·정확도나 검증된 모델 신뢰도가 아닙니다. 보고하지 않은 수치는 0으로 표시하지 않습니다.';
       $('similarity-provenance').textContent=semantic?[text(similarity.method),text(similarity.model)].filter(Boolean).join(' · '):'';
       $('candidate-list').replaceChildren();
       if (!Array.isArray(candidates) || !candidates.length) {
         $('candidate-list').append(element('p', 'fine-print', semantic?'계산된 유사도 후보가 아직 없습니다.':'이 분석에는 후보 표현과 적합도 보고가 없습니다.'));
         return;
       }
-      for (const candidate of candidates.slice(0, 50)) {
+      for (const [index,candidate] of candidates.slice(0,5).entries()) {
         if (!isObject(candidate)) continue;
-        const score = semantic ? (typeof candidate.similarity==='number'&&Number.isFinite(candidate.similarity)&&candidate.similarity>=-100&&candidate.similarity<=100?candidate.similarity:null) : scoreValue(candidate.score);
+        const comparison=semanticByLabel.get(candidate.label);
+        const score = semantic ? (typeof comparison?.similarity==='number'&&Number.isFinite(comparison.similarity)&&comparison.similarity>=-100&&comparison.similarity<=100?comparison.similarity:null) : scoreValue(candidate.score);
         const row = element('div', 'candidate');
         const header = element('div', 'candidate-header');
-        header.append(element('span', 'candidate-label', text(candidate.label) || '표현 미보고'));
-        header.append(element('span', 'candidate-score', score === null ? '미보고' : `${Math.round(score * 10) / 10}${semantic?'':' / 100'}`));
+        header.append(element('span', 'candidate-label', '#'+(index+1)+' '+(text(candidate.label) || '표현 미보고')));
+        header.append(element('span', 'candidate-score', score === null ? (semantic?'측정불가':'미보고') : `${semantic?'의도 유사도 ':''}${Math.round(score * 10) / 10}${semantic?'':' / 100'}`));
         row.append(header);
         if (score !== null) {
           const bar = element('div', 'candidate-bar');

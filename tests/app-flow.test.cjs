@@ -307,7 +307,7 @@ test('webcam recording pauses without joining movements while networking is disa
   const { input, report } = app.reports.at(-1);
   assert.equal(input.source, 'webcam');
   assert.equal(input.durationMs, 1950, 'Paused wall-clock time is excluded');
-  assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
+  assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [0, 1]);
   assert.equal(report.sufficient, true);
   assert.ok(report.payload.metrics.pathLength < 0.15, 'Jump during pause is not counted in traveled distance');
   assert.equal(app.get('analyze-button').hidden,true);
@@ -329,7 +329,7 @@ test('tracking loss also opens a new recording segment, and finishing stops came
   await app.click('finish');
   const { input, report } = app.reports.at(-1);
   assert.equal(input.durationMs, 2050);
-  assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
+  assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [0, 1]);
   assert.equal(camera.stopped, true);
   assert.ok(report.payload.metrics.pathLength < 0.15);
 });
@@ -503,7 +503,7 @@ test('retrying after a camera error preserves the recorded segment and resumes o
 
   const { input, report } = app.reports.at(-1);
   assert.equal(input.durationMs, 1950, 'Reconnection time is excluded');
-  assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [1, 2]);
+  assert.deepEqual([...new Set(report.payload.samples.map(sample => sample.segment))], [0, 1]);
   assert.equal(input.poseFrames[0].joints.leftWrist[0], 0.2, 'The first take remains in the result');
   assert.ok(report.payload.metrics.pathLength < 0.15, 'Reconnection does not draw a jump between takes');
   assert.equal(replacement.stopped, true);
@@ -1189,7 +1189,7 @@ test('candidate expressions are open and unmeasured scores stay unavailable unti
  const app=createApp({automaticAI:true,fetchResponse:async()=>ok(result)});const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
  assert.equal(app.get('analysis-candidates').hidden,false);assert.equal(app.get('analysis-candidates').tagName,'SECTION');
  const candidates=app.get('candidate-list').children;assert.equal(candidates.length,5);
- assert.equal(candidates[0].children[0].children[0].textContent,'유연한');assert.equal(candidates[0].children[0].children[1].textContent,'—');
+ assert.equal(candidates[0].children[0].children[0].textContent,'#1 유연한');assert.equal(candidates[0].children[0].children[1].textContent,'측정 전');
  assert.equal(candidates[0].children[1].children[0].style.getPropertyValue('--similarity'),'0');
  assert.equal(app.get('ai-word').textContent,result.analysis.impression);assert.equal(app.get('analyze-button').hidden,true);
  await app.click('restart');await app.click('start');assert.equal(app.get('analysis-candidates').hidden,true);
@@ -1218,9 +1218,9 @@ test('TOP 5 bars display semantic cosine values rather than provider suitability
  app.get('intent-short').value='빠름';await app.get('intent-short').dispatch('input');await flush();
  assert.equal(semanticCalls.length,1);assert.equal(semanticCalls[0].query,'빠름');assert.equal(semanticCalls[0].options.limit,5);
  const rows=app.get('candidate-list').children;
- assert.equal(rows[0].children[0].children[0].textContent,'날카로운');assert.equal(rows[0].children[0].children[1].textContent,'31.5');
- assert.equal(rows[0].children[1].children[0].style.getPropertyValue('--similarity'),'31.5');
- assert.equal(rows[1].children[0].children[1].textContent,'-12.0');assert.equal(rows[1].children[1].children[0].style.getPropertyValue('--similarity'),'12');assert.match(rows[1].children[1].className,/is-negative/);
+ assert.equal(rows[0].children[0].children[0].textContent,'#1 유연한');assert.equal(rows[0].children[0].children[1].textContent,'유사도 -12.0');
+ assert.equal(rows[0].children[1].children[0].style.getPropertyValue('--similarity'),'12');assert.match(rows[0].children[1].className,/is-negative/);
+ assert.equal(rows[1].children[0].children[0].textContent,'#2 날카로운');assert.equal(rows[1].children[0].children[1].textContent,'유사도 31.5');assert.equal(rows[1].children[1].children[0].style.getPropertyValue('--similarity'),'31.5');
  assert.equal(app.get('ai-word').textContent,result.analysis.impression,'Ranking intent similarity does not replace the AI movement impression');
  assert.equal(app.calls.length,1);assert.ok(!app.calls[0].options.body.includes('빠름'));assert.match(app.get('similarity-status').textContent,/코사인/);
 });
@@ -1234,10 +1234,48 @@ test('rapid intent changes and fresh takes cannot display stale semantic results
  assert.equal(pending.length,2);assert.equal(pending[0].options.signal.aborted,true);
  pending[1].resolve({results:[{label:'유연한',similarity:75,rawCosine:.75,evidence:'최근'}]});await flush();
  pending[0].resolve({results:[{label:'유연한',similarity:10,rawCosine:.1,evidence:'오래전'}]});await flush();
- assert.equal(app.get('candidate-list').children[0].children[0].children[1].textContent,'75.0');
+ assert.equal(app.get('candidate-list').children[0].children[0].children[1].textContent,'유사도 75.0');
  app.get('intent-short').value='우아함';await app.get('intent-short').dispatch('input');
  await app.click('restart');await app.click('start');assert.equal(pending[2].options.signal.aborted,true);
  pending[2].resolve({results:[{label:'유연한',similarity:99,rawCosine:.99,evidence:'이전 기록'}]});await flush();
  assert.equal(app.get('analysis-candidates').hidden,true);assert.equal(app.get('candidate-list').children.length,0);
  assert.equal(app.get('intent-word').textContent,'선택 전');
+});
+
+
+test('AI TOP 5 order and representative stay fixed across intent changes and OOV while semantic values and log snapshots update',async()=>{
+ const result=copy(aiResult);
+ result.analysis.candidates=['단호한','가벼운','차분한','날카로운','기계적인'].map((label,index)=>({label,score:99-index,evidence:'움직임 근거 '+index}));
+ const expectedLabels=result.analysis.candidates.map((candidate,index)=>'#'+(index+1)+' '+candidate.label);
+ const semanticCalls=[];
+ const app=createApp({logBase,privateStorage:true,automaticAI:true,fetchResponse:async()=>ok(result),semanticRank:async(query,candidates)=>{
+   semanticCalls.push({query,candidates:copy(candidates)});
+   if(query==='없는말')return {method:'fasttext-cosine',model:'test-vectors',results:[],unavailable:candidates.map(candidate=>({...candidate,similarity:null,rawCosine:null})),queryCoverage:0};
+   const compared=candidates.map((candidate,index)=>({...candidate,similarity:query==='차분'?index*10:40-index*10,rawCosine:query==='차분'?index/10:.4-index/10}));
+   return {method:'fasttext-cosine',model:'test-vectors',results:compared.filter((_,index)=>index!==2).sort((a,b)=>b.similarity-a.similarity),unavailable:[{...candidates[2],similarity:null,rawCosine:null}],queryCoverage:1};
+ }});
+ const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
+ const labels=()=>app.get('candidate-list').children.map(row=>row.children[0].children[0].textContent);
+ assert.deepEqual(labels(),expectedLabels);
+ for(const intent of ['차분','강렬','없는말']){
+   app.get('intent-short').value=intent;await app.get('intent-short').dispatch('input');await flush();
+   assert.deepEqual(labels(),expectedLabels,'An intention must never rerank the five movement interpretations');
+   assert.equal(app.get('ai-word').textContent,result.analysis.impression);
+   assert.equal(app.calls.length,1,'Intent comparison must not request a fresh AI movement interpretation');
+   assert.deepEqual(semanticCalls.at(-1).candidates,result.analysis.candidates);
+   const snapshot=copy([...app.storedLogs.values()][0].record);
+   assert.deepEqual(snapshot.analysis.candidates,result.analysis.candidates);
+   assert.equal(snapshot.similarity.rankingScope,'ai-movement-order');
+   assert.deepEqual(snapshot.similarity.results.map(item=>({label:item.label,aiRank:item.aiRank})),result.analysis.candidates.map((candidate,index)=>({label:candidate.label,aiRank:index+1})));
+   assert.equal(snapshot.similarity.results[2].similarity,null,'Unknown words must not become a manufactured zero');
+   assert.equal(snapshot.similarity.results[2].rawCosine,null);
+   assert.equal(app.get('candidate-list').children[2].children[0].children[1].textContent,'측정불가');
+   if(intent==='차분')assert.equal(snapshot.similarity.results[0].similarity,0,'A genuine computed zero stays measurable');
+   if(intent==='강렬')assert.equal(snapshot.similarity.results[0].similarity,40);
+   if(intent==='없는말'){
+     assert.ok(snapshot.similarity.results.every(item=>item.similarity===null));
+     assert.ok(app.get('candidate-list').children.every(row=>row.children[0].children[1].textContent==='측정불가'));
+   }
+ }
+ assert.equal(semanticCalls.length,3);assert.ok(app.calls.every(call=>!call.options.body.includes('차분')));
 });

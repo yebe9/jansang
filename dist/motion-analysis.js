@@ -31,9 +31,12 @@
   const TORSO = ['leftShoulder', 'rightShoulder', 'leftHip', 'rightHip'];
   const FULL_BODY = [...TORSO, 'leftKnee', 'rightKnee', 'leftAnkle', 'rightAnkle'];
   const MOTION_JOINTS = [...UPPER_GROUPS.flat(), ...LOWER_GROUPS.flat()];
+  const BODY_CONTINUITY_JOINTS = [...MOTION_JOINTS, 'leftFootIndex', 'rightFootIndex'];
   const MIN_INTERVAL_MS = 8;
   const MAX_INTERVAL_MS = 250;
   const STILL_SPEED = 0.055;
+  const BODY_SAMPLE_LIMIT = 80;
+  const MAX_PAYLOAD_BYTES = 100 * 1024;
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
   const finite = (value) => typeof value === 'number' && Number.isFinite(value);
   const round = (value, precision = 5) => {
@@ -399,7 +402,7 @@
         sampleData.at(-1).t - sampleData[0].t >= 1000;
       metrics.validFrameRatio = round(handFrames.length ? sampleData.length / handFrames.length : 0);
     }
-    const samples = sampleEvenly(sampleData).map((frame) => {
+    const transportFrame = (frame) => {
       if (source !== 'webcam' && source !== 'hand') {
         return { t: Math.min(durationMs, round(frame.t, 3)), x: round(frame.x), y: round(frame.y), stroke: frame.stroke };
       }
@@ -417,8 +420,47 @@
       for (const [name, point] of Object.entries(frame.joints)) joints[name] = point.map((value) => round(value));
       return {t:Math.min(durationMs,round(frame.t,3)),joints,segment:frame.segment,
         ...(frame.worldJoints?{worldJoints:Object.fromEntries(Object.entries(frame.worldJoints).map(([name,xyz])=>[name,xyz.map(v=>round(v))]))}: {})};
-    });
+    };
+    const sampleLimit = source === 'webcam' ? BODY_SAMPLE_LIMIT : 60;
+    // A brief occlusion or pause may fall between selected timestamps. Give each
+    // observed body run an ID before thinning, then compress only those IDs.
+    // Keep the recording itself untouched and never bridge a hidden gap.
+    let bodyRun = 0;
+    let previousBody = null;
+    let previousSignature = null;
+    const transportData = source === 'webcam' ? sampleData.map(frame => {
+      // Finger and heel visibility must not fragment a valid full-body run;
+      // MotionGPT uses these 14 measured joints, including both foot tips.
+      const observed = joints => BODY_CONTINUITY_JOINTS.filter(name => Object.hasOwn(joints, name)).join(',');
+      const signature = [frame.segment, observed(frame.joints), observed(frame.worldJoints || {})].join('|');
+      if (previousBody && (signature !== previousSignature || frame.t - previousBody.t > MAX_INTERVAL_MS)) bodyRun += 1;
+      previousBody = frame;
+      previousSignature = signature;
+      return { ...frame, segment: bodyRun };
+    }) : sampleData;
+    const sampleTransport = limit => {
+      let lastRun = null;
+      let segment = -1;
+      return sampleEvenly(transportData, limit).map(frame => {
+        if (source !== 'webcam') return transportFrame(frame);
+        if (frame.segment !== lastRun) segment += 1;
+        lastRun = frame.segment;
+        return transportFrame({ ...frame, segment });
+      });
+    };
+    const samples = sampleTransport(sampleLimit);
     const payload = { source, durationMs, captureAspect: aspect, sampleCount: sampleData.length, metrics, samples };
+    if (source === 'webcam') {
+      // Full 22-joint XYZ recordings can exceed the server's 100 KiB input cap.
+      // Keep the largest temporal sample budget that fits without reducing
+      // coordinate precision, merging segments, or filling missing joints.
+      // Sanitized payload keys and values are ASCII, so string length is bytes.
+      let budget = samples.length;
+      while (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES && budget > 2) {
+        budget -= 1;
+        payload.samples = sampleTransport(budget);
+      }
+    }
     if (source === 'hand') payload.handTarget = handTarget;
     return {
       payload,

@@ -1,8 +1,10 @@
+import { measureMotionEvidence, DYNAMIC_THRESHOLDS } from './motion-evidence.mjs';
 // Empirical visual-language gates, not a validated measure of bodily flexibility.
 // Angles below are 2D projected angles corrected by the capture aspect ratio.
 // Missing legacy aspect ratios never count as joint-flexibility evidence.
-export const RUBRIC_VERSION = 'visual-rubric-v1';
+export const RUBRIC_VERSION = 'visual-rubric-v2';
 export const RUBRIC_THRESHOLDS = Object.freeze({
+  dynamic: DYNAMIC_THRESHOLDS,
   maxGapMs: 250,
   movingSpeed: 0.02,
   flow: Object.freeze({
@@ -29,7 +31,7 @@ export const VISUAL_DEFINITIONS = Object.freeze({
   '매끄러운': '연결에서 갑작스러운 튐이 적음',
   '사뿐한': '짧고 가벼운 이동과 조심스러운 내려놓음',
   '나풀거리는': '가볍게 흔들리는 작은 왕복 곡선',
-  '역동적인': '큰 이동과 뚜렷한 속도·방향 변화',
+  '역동적인': '지속되는 크고 빠른 이동과 속도·방향 변화; 게이트 필수',
   '폭발적인': '멈춤이나 작은 동작 뒤 급격히 커지는 이동',
   '절도 있는': '분명한 멈춤과 구분되는 방향 전환',
   '파워풀한': '넓은 범위를 빠르고 강하게 가로지르는 인상',
@@ -37,7 +39,7 @@ export const VISUAL_DEFINITIONS = Object.freeze({
   '거침없는': '멈춤이 적고 크게 뻗어나감',
   '저돌적인': '한 방향으로 빠르고 반복적으로 밀고 나감',
   '직선적인': '굽은 선보다 곧은 이동이 우세함',
-  '압도적인': '넓은 화면을 차지하는 큰 동작의 연속',
+  '압도적인': '여러 부위가 넓은 이동 폭으로 연속 전개됨; 정적 자세 크기는 불가',
   '몽환적인': '느리고 흐릿하게 이어지는 완만한 궤적',
   '신비로운': '규칙이 쉽게 드러나지 않는 느린 변화',
   '의식적인': '같은 형태를 느리고 엄정하게 반복함',
@@ -149,6 +151,7 @@ function jointAngle(joints, names, aspect) {
 }
 
 export function evaluateExpressionRubric(motion) {
+  const motionEvidence = measureMotionEvidence(motion);
   const knownAspect = Number.isFinite(motion.captureAspect) && motion.captureAspect >= 0.2 && motion.captureAspect <= 5;
   const aspect = knownAspect ? motion.captureAspect : 1;
   const runs = collectRuns(motion.samples, frame => {
@@ -202,7 +205,8 @@ export function evaluateExpressionRubric(motion) {
     note: knownAspect
       ? '영상 비율을 보정한 2D 관측의 경험적 표현 기준이며 신체 유연성·실제 감정의 측정이 아닙니다.'
       : '영상 비율이 없어 유연한은 제외했습니다. 흐름은 정사각 투영의 경험 기준이며 신체 유연성·실제 감정의 측정이 아닙니다.',
-    eligible: { '유연한': flexible, '유려한': flow },
+    eligible: { '유연한': flexible, '유려한': flow, '역동적인': motionEvidence.eligibleDynamic },
+    motionEvidence,
     metrics: {
       captureAspect: knownAspect ? round(aspect) : null,
       continuousMs: round(strongest?.durationMs), meanSpeed: round(strongest?.meanSpeed),

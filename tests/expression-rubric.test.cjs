@@ -185,7 +185,7 @@ test('request schemas enforce the same gates across representative, qualities an
     for (const labels of [properties.impression.enum, properties.qualities.items.enum, properties.candidates.items.properties.label.enum]) {
       assert.equal(labels.includes('유연한'), eligibleFlex);
       assert.equal(labels.includes('유려한'), eligibleFlow);
-      assert.equal(labels.length, 48 + Number(eligibleFlex) + Number(eligibleFlow));
+      assert.equal(labels.length, 47 + Number(eligibleFlex) + Number(eligibleFlow) + Number(properties.impression.enum.includes('역동적인')));
     }
   }
 });

@@ -427,3 +427,21 @@ test('a deleted and recreated video generation rejects an old pending metadata C
  release.resolve();const response=await pending;assert.equal(response.status,409);assert.equal((await response.json()).error.code,'RECORD_REPLACED');
  const saved=(await(await call(f,'/api/records/'+data.id,{cookie})).json()).record;assert.equal(saved.intention,'새 영상');assert.equal(saved.revision,1);assert.equal(f.videos.size,1);f.sqlite.close();
 });
+
+
+test('similarity validator preserves AI rank, measured zero and unknown null without coercion',async()=>{
+ const {validateRecord}=await moduleReady;
+ const data=record();data.similarity={method:'fasttext-cosine',model:'test-vectors',rankingScope:'ai-movement-order',results:[
+   {label:'분주한',aiRank:1,similarity:null,rawCosine:null,evidence:'원래 움직임 근거'},
+   {label:'리드미컬한',aiRank:2,similarity:0,rawCosine:0,evidence:'실제 0'}
+ ]};
+ assert.deepEqual(validateRecord(data).similarity,data.similarity);
+ for(const rank of [0,6,1.5,'1',null]){
+   const invalid=structuredClone(data);invalid.similarity.results[0].aiRank=rank;
+   assert.throws(()=>validateRecord(invalid),/순위/);
+ }
+ for(const value of [undefined,'0',101,-101]){
+   const invalid=structuredClone(data);invalid.similarity.results[0].similarity=value;
+   assert.throws(()=>validateRecord(invalid),/수치/);
+ }
+});

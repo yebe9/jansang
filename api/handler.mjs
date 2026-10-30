@@ -62,13 +62,13 @@ const OUTPUT_SCHEMA = {
 };
 
 const SYSTEM_PROMPT = `너는 '잔상(Ghosting)'의 움직임 감상 도우미다. 좌표의 질감·리듬·분위기를 한국어 JSON으로 답한다. impression과 qualities는 스키마 enum의 정확한 표현만 쓰고 qualities는 대표부터 근거 있는 1~3개만 고른다. 감상 1~2문장과 근거 1개를 짧게 쓴다. 감상에 숫자·지표명·점수·진단은 쓰지 않는다.
-50개 정의를 모두 비교하되 다양성을 위해 억지로 바꾸거나 늘 고르는 익숙한 표현으로 채우지 않는다. candidates는 근거가 있는 상위 후보 정확히 5개이며 대표를 포함한다. 사용자 의도는 받지 않으며 움직임만 보고 후보를 선정한다. score는 네가 제시하는 비보정 적합도 0~100이다; 확률·내부 logprob·감정 확률이 아니며 합계 100일 필요도 없다. 동점 가능, 대표를 최고점으로 하고 근거는 후보당 25자 이내다. 미보고 후보는 0점이 아니다.
-expressionRubric은 경험적 선택 제한이다. eligible=false인 유연한·유려한은 후보·대표·태그·감상에 쓰지 않는다. 유연한은 전신 관절 굽힘과 펴짐 근거가 필수이고 단순한 곡선·이동·속도만으로 불가하다. 유려한은 장시간의 안정된 속도·방향 연결이 모두 필요하다. eligible=true여도 자동 선택하지 않는다.
+50개 정의를 모두 비교하되 다양성을 위해 억지로 바꾸거나 늘 고르는 익숙한 표현으로 채우지 않는다. candidates는 근거가 있는 상위 후보 정확히 5개이며 적합도가 높은 순서로 배열하고 첫 번째가 대표다. 사용자 의도는 받지 않으며 움직임만 보고 후보를 선정한다. score는 네가 제시하는 비보정 적합도 0~100이다; 확률·내부 logprob·감정 확률이 아니며 합계 100일 필요도 없다. 동점 가능, 대표를 최고점으로 하고 근거는 후보당 25자 이내다. 미보고 후보는 0점이 아니다.
+expressionRubric은 경험적 선택 제한이다. eligible=false인 모든 표현은 후보·대표·태그·감상에 쓰지 않는다. 유연한은 전신 관절 굽힘과 펴짐 근거가 필수이고 단순한 곡선·이동·속도만으로 불가하다. 유려한은 장시간의 안정된 속도·방향 연결이 모두 필요하다. 역동적인은 큰 자세나 움직임 존재만으로 선택하지 않고 충분한 이동 폭·빠른 구간·연속성·속도 또는 방향 변화가 모두 필요하다. eligible=true여도 자동 선택하지 않는다.
 영상·얼굴·음성·사용자 의도는 없다. 실제 감정·정신 상태·의도·성격·건강·정체성은 추론하지 않는다. 감정 어휘는 시각적 비유이며 음악·실력도 단정하지 않는다.
 ${ENCODING_GUIDE}
 좌표 원점은 좌상단이고 웹캠은 거울 화면이다. 최대 24프레임의 실제 관측만 읽는다. 큰 시간 공백·가림·누락을 채우지 말고 짧거나 불완전하면 확신을 낮춘다.
 webcam은 얼굴 없는 전신으로 보인 부위만, 발이 보이면 스텝도 읽는다. hand는 손만 읽으며 handTarget=indexTip은 검지 끝, wrist는 손목을 우선한다. 전신 관절이 없어도 손 감상은 가능하다. 손 id는 왼손·오른손이 아니다. 두 손 관계는 동시에 보인 연속 구간에서만 읽고 상대 좌표 근거 없이 교차·회전을 만들거나 화면 겹침을 접촉으로 단정하지 않는다.
-pointer는 선만 읽고 example은 합성 예시임을 감상에 밝힌다. 지표는 보조값이다. 속도는 화면 대각선 기준 초당 거리, hand 평균은 관측된 선택점의 평균이므로 한 손의 움직임을 전체 정지로 오해하지 않는다. 몸·손 자체의 크기를 역동성으로 보지 않는다.
+pointer는 선만 읽고 example은 합성 예시임을 감상에 밝힌다. motionEvidence는 압축 전 모든 수신 좌표로 서버가 계산한 실제 이동 근거다. dominantTrack는 가장 활동적인 단일 관절일 뿐 전신이 아니다. regions와 activeTracks를 비교해 상체·하체·몸통을 구분한다. range는 시간에 따른 이동 폭이고 몸의 크기와 다르다. 작은 떨림·좁은 스텝을 넓은 전신 동작으로 부풀리지 않는다. 빠른 주기운동은 리듬, 느린 넓은 곡선은 흐름 등 구체적인 특징을 먼저 비교하고 역동적인을 포괄적 기본값으로 쓰지 않는다. client의 최고 활동 부위 속도와 정적 spread는 해석에서 제외했다. 속도는 화면 대각선 기준 초당 거리, hand 평균은 관측된 선택점의 평균이므로 한 손의 움직임을 전체 정지로 오해하지 않는다. 몸·손 자체의 크기를 역동성으로 보지 않는다.
 시각적 정의(감정 단어도 비유일 뿐이다):
 ${DANCE_LABELS.map(label => `${label}:${VISUAL_DEFINITIONS[label]}`).join('\n')}`;
 
@@ -225,9 +225,9 @@ function assertActive(signal) {
   if (signal.aborted) throw timedOut();
 }
 
-async function withDeadline(operation, requestedMs) {
+async function withDeadline(operation, requestedMs, ceilingMs = ANALYSIS_DEADLINE_MS) {
   const timeoutMs = Number.isFinite(requestedMs)
-    ? Math.min(ANALYSIS_DEADLINE_MS, Math.max(1, requestedMs)) : ANALYSIS_DEADLINE_MS;
+    ? Math.min(ceilingMs, Math.max(1, requestedMs)) : ANALYSIS_DEADLINE_MS;
   const controller = new AbortController();
   const deadlineAt = Date.now() + timeoutMs;
   let timer;
@@ -425,9 +425,10 @@ function analysisRequest(motion, model, rubric, motionCaption = null) {
   return {
     systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents: [{ role: 'user', parts: [{ text: JSON.stringify({
-      ...encodeMotion(compactMotion(motion)),
+      ...encodeMotion(compactMotion({ ...motion, metrics: {} })),
+      motionEvidence: rubric.motionEvidence,
       expressionRubric: { version: rubric.version, eligible: rubric.eligible, metrics: rubric.metrics },
-      ...(motionCaption ? {motionCaption:{caption:motionCaption.caption,provider:'MotionGPT',note:'이 실제 MotionGPT 동작 설명을 우선 근거로 인상을 한국어로 표현하되, 관절 재타기팅과 루트 이동 추정의 한계가 있다.'}} : {}),
+      ...(motionCaption ? {motionCaption:{caption:motionCaption.caption,provider:'MotionGPT',retargeting:motionCaption.retargeting,note:'학습 모델의 보조 캡션이며 측정 사실이 아니다. 관측 좌표와 motionEvidence에 맞지 않는 걷기·점프·회전 등의 서술은 채택하지 않는다. hip-centred 좌표는 루트 이동을 잃고 일부 관절은 추정되므로 이동·도약을 캡션만으로 확정하지 않는다.'}} : {}),
     }) }] }],
     generationConfig,
   };
@@ -581,7 +582,7 @@ export async function handleApi(request, {
       assertActive(signal);
       if (!permitted) throw new ApiError(429, 'RATE_LIMITED', '분석 요청이 많습니다. 1분 뒤에 다시 시도해 주세요.');
       return analyze(motion, env, fetchImpl, signal, remainingMs, diagnostic);
-    }, timeoutMs);
+    }, timeoutMs, env.MOTIONGPT_URL ? 180000 : ANALYSIS_DEADLINE_MS);
     diagnostic.stage = 'complete';
     return json(200, result);
   } catch (error) {

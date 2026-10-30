@@ -381,11 +381,11 @@ test('session expiry and logout report exact pending revisions to the durable pa
 
 test('semantic similarities keep negative values and model provenance distinct from legacy fit scores',async()=>{
  const app=harness();await app.app.start();
- const record={...example(),revision:2,similarity:{method:'fasttext-cosine',model:'cc.ko.300',results:[{label:'단호한',similarity:-23.5,rawCosine:-.235,evidence:'단어 벡터 비교'}]}};
+ const record={...example(),revision:2,similarity:{method:'fasttext-cosine',model:'cc.ko.300',results:[{label:'나풀거리는',similarity:61,rawCosine:.61},{label:'유연한',similarity:-23.5,rawCosine:-.235,evidence:'단어 벡터 비교'}]}};
  await app.capture(record,null);
- assert.match(app.get('candidates-heading').textContent,/의미 유사도/);
+ assert.equal(app.get('candidates-heading').textContent,'AI 해석 결과 TOP 5');assert.match(app.get('candidate-description').textContent,/내 의도와 의미 유사도/);
  assert.equal(app.get('candidate-scale').textContent,'코사인 × 100');assert.match(app.get('similarity-provenance').textContent,/cc.ko.300/);
- const row=app.get('candidate-list').children[0];assert.match(row.children[0].textContent,/-23.5/);
+ const row=app.get('candidate-list').children[0];assert.equal(row.children[0].children[0].textContent,'#1 유연한');assert.match(row.children[0].textContent,/-23.5/);assert.equal(app.get('candidate-list').children[1].children[0].children[0].textContent,'#2 나풀거리는');
  assert.equal(row.children[1].getAttribute('aria-valuemin'),'-100');assert.equal(row.children[1].getAttribute('aria-valuenow'),'-23.5');
  assert.equal(row.children[1].children[1].style.width,'11.75%');
 });
@@ -491,4 +491,21 @@ test('a stale discard confirmation cannot discard a newer pending revision',asyn
  await app.get('confirm-accept').click();await cancelling;
  assert.equal(app.messages.some(item=>item.message.type==='ghosting:discarded'),false);
  assert.equal(app.get('detail-intention').textContent,'최근 입력');assert.equal(app.get('pending-actions').hidden,false);
+});
+
+
+test('private log keeps all five AI rows and their movement evidence when similarity is missing or unavailable',async()=>{
+ const app=harness();await app.app.start();
+ const record=example();record.analysis.candidates=['단호한','가벼운','차분한','날카로운','기계적인'].map((label,index)=>({label,score:80-index,evidence:'원래 움직임 근거 '+index}));
+ record.similarity={method:'fasttext-cosine',model:'test-vectors',results:[
+   {label:'날카로운',aiRank:4,similarity:82,rawCosine:.82,evidence:'semantic override'},
+   {label:'단호한',aiRank:1,similarity:0,rawCosine:0},
+   {label:'기계적인',aiRank:5,similarity:null,rawCosine:null}
+ ]};
+ await app.capture(record,null);
+ const rows=app.get('candidate-list').children;assert.equal(rows.length,5);
+ assert.deepEqual(rows.map(row=>row.children[0].children[0].textContent),record.analysis.candidates.map((candidate,index)=>'#'+(index+1)+' '+candidate.label));
+ assert.match(rows[0].children[0].textContent,/의도 유사도 0/);assert.equal(rows[0].children[1].getAttribute('aria-valuenow'),'0');
+ for(const index of [1,2,4]){assert.match(rows[index].children[0].textContent,/측정불가/);assert.equal(rows[index].children.length,2);}
+ assert.match(rows[3].children[2].textContent,/원래 움직임 근거 3/);assert.doesNotMatch(rows[3].textContent,/semantic override/);
 });

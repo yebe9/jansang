@@ -274,16 +274,19 @@
     $('analysis-evidence').hidden = !analysis;
     $('analysis-observations').replaceChildren(...(analysis?.observations || []).map(text=>{const li=document.createElement('li');li.textContent=text;return li;}));
     const candidates=Array.isArray(analysis?.candidates)?analysis.candidates.filter(c=>c&&typeof c.label==='string').slice(0,5):[];
-    const ranked=similarityResult?.results?.length?similarityResult.results:candidates;
+    // AI movement rank stays fixed; intent only supplies a separate comparison value.
+    const semanticByLabel=new Map((similarityResult?.results||[]).map(item=>[item.label,item]));
+    const ranked=candidates.map((candidate,index)=>({...candidate,aiRank:index+1,similarity:semanticByLabel.get(candidate.label)?.similarity??null}));
     $('analysis-candidates').hidden = !analysis;
-    $('similarity-status').textContent = similarityMessage || (analysis ? '내 표현을 남기면 다섯 인상과의 의미 유사도를 계산합니다.' : '');
+    $('similarity-status').textContent = similarityMessage || (analysis ? 'AI가 움직임에서 고른 순서입니다. 내 표현을 남기면 각 인상과 내 의도의 의미 유사도를 계산합니다.' : '');
     $('candidate-list').replaceChildren(...ranked.map((item,index)=>{
       const li=document.createElement('li');li.className='similarity-row';
       const heading=document.createElement('div');heading.className='similarity-row-heading';
-      const label=document.createElement('strong');label.className='similarity-label';label.textContent=item.label;
+      const label=document.createElement('strong');label.className='similarity-label';label.textContent='#'+item.aiRank+' '+item.label;
       const score=document.createElement('span');score.className='similarity-score';
       const measured=typeof item.similarity==='number'&&Number.isFinite(item.similarity);
-      score.textContent=measured?item.similarity.toFixed(1):'—';heading.append(label,score);
+      score.textContent=measured?'유사도 '+item.similarity.toFixed(1):(similarityResult?'측정불가':'측정 전');
+      score.setAttribute('aria-label','내 의도와 의미 유사도 '+(measured?item.similarity.toFixed(1):(similarityResult?'측정불가':'측정 전')));heading.append(label,score);
       const track=document.createElement('div');track.className='similarity-track'+(measured&&item.similarity<0?' is-negative':'');
       const fill=document.createElement('span');fill.className='similarity-bar-fill';
       fill.style.setProperty('--similarity',String(measured?Math.min(100,Math.abs(item.similarity)):0));
@@ -390,7 +393,7 @@
         handTarget:captureSource==='hand'?handTarget:null,durationMs:duration,intention:intendedFeeling,
         details:$('intent-detail').value,analysis:analysis?JSON.parse(JSON.stringify(analysis)):null,
         analysisError:analysisState==='error'?{code:analysisErrorCode,message:analysisMessage}:null,
-        metrics:{...(motionReport?.payload?.metrics||{})},similarity:similarityResult?{method:similarityResult.method,model:similarityResult.model,rankingScope:'movement-candidates',queryCoverage:similarityResult.queryCoverage,missingTokens:similarityResult.missingTokens,matchedTokens:similarityResult.matchedTokens,limitations:similarityResult.limitations,results:similarityResult.results.map(item=>({label:item.label,similarity:item.similarity,rawCosine:item.rawCosine,evidence:item.evidence||''}))}:null};
+        metrics:{...(motionReport?.payload?.metrics||{})},similarity:similarityResult?{method:similarityResult.method,model:similarityResult.model,rankingScope:'ai-movement-order',queryCoverage:similarityResult.queryCoverage,missingTokens:similarityResult.missingTokens,matchedTokens:similarityResult.matchedTokens,limitations:similarityResult.limitations,results:similarityResult.results.map(item=>({label:item.label,aiRank:item.aiRank,similarity:item.similarity,rawCosine:item.rawCosine,evidence:item.evidence||''}))}:null};
       privateLogs.enqueue(record,recordedVideo).catch(error=>{autoSaveMessage='자동 보관 실패: '+error.message;updateLogUI();});
     };
     // Persist each edit immediately; the log client coalesces online writes at eight-second intervals.
@@ -401,7 +404,7 @@
     similarityController?.abort();const version=++similarityVersion;
     similarityResult=null;
     const query=[intendedFeeling,$('intent-detail').value.trim()].filter(Boolean).join(' ');
-    const candidates=analysis?.candidates;
+    const candidates=Array.isArray(analysis?.candidates)?analysis.candidates.filter(candidate=>candidate&&typeof candidate.label==='string').slice(0,5):[];
     if(!query||!Array.isArray(candidates)||!candidates.length){similarityMessage='';updateComparison();queueAutoSave(600);return;}
     if(!window.GhostingSemantic){similarityMessage='한국어 유사도 모델을 준비하지 못했어요.';updateComparison();queueAutoSave(600);return;}
     const controller=new AbortController();similarityController=controller;
@@ -409,8 +412,14 @@
     try{
       const result=await window.GhostingSemantic.rank(query,candidates,{limit:5,signal:controller.signal});
       if(version!==similarityVersion||controller.signal.aborted)return;
-      similarityResult=result;
-      similarityMessage=result.results.length?(result.queryCoverage<1?'일부 단어가 사전에 없어 확인되는 단어로 비교했습니다. ':'')+'단어 벡터의 코사인 유사도 · 감정의 정확도나 확률이 아닙니다.':'이 표현의 단어 벡터를 찾지 못했어요. 다른 말로 남겨주세요.';
+      const semanticByLabel=new Map([...(result.results||[]),...(result.unavailable||[])].map(item=>[item.label,item]));
+      similarityResult={...result,rankingScope:'ai-movement-order',results:candidates.map((candidate,index)=>{
+        const compared=semanticByLabel.get(candidate.label);
+        return {label:candidate.label,aiRank:index+1,evidence:candidate.evidence||'',
+          similarity:typeof compared?.similarity==='number'&&Number.isFinite(compared.similarity)?compared.similarity:null,
+          rawCosine:typeof compared?.rawCosine==='number'&&Number.isFinite(compared.rawCosine)?compared.rawCosine:null};
+      })};
+      similarityMessage=(result.results||[]).length?(result.queryCoverage<1?'일부 단어가 사전에 없어 확인되는 단어로 비교했습니다. ':'')+'내 의도와 의미 유사도: 단어 벡터의 코사인 값입니다. AI 순위는 바뀌지 않으며 감정의 정확도나 확률이 아닙니다.':'내 의도의 단어 벡터를 찾지 못해 의미 유사도를 측정할 수 없어요. AI가 고른 다섯 인상은 그대로입니다.';
     }catch(error){if(version!==similarityVersion||controller.signal.aborted)return;similarityMessage='유사도를 계산하지 못했어요. '+error.message;}
     finally{if(version===similarityVersion){updateComparison();queueAutoSave(400);}}
   }

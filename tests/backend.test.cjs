@@ -6,7 +6,8 @@ const rubricModule = import('../api/expression-rubric.mjs');
 const providerMotion = async value => {
   const rubric = (await rubricModule).evaluateExpressionRubric(value);
   return {
-    ...(await encoding).encodeMotion((await handler).compactMotion(value)),
+    ...(await encoding).encodeMotion((await handler).compactMotion({...value,metrics:{}})),
+    motionEvidence: rubric.motionEvidence,
     expressionRubric: { version: rubric.version, eligible: rubric.eligible, metrics: rubric.metrics },
   };
 };
@@ -365,9 +366,9 @@ test('browser motion analyzer emits a payload accepted by the API after a pause'
   }));
   const report = analyze({ source: 'webcam', poseFrames: frames, durationMs: 10000, captureAspect: 4 / 3 });
   assert.equal(report.sufficient, true);
-  assert.ok(report.payload.samples.length <= 60);
+  assert.ok(report.payload.samples.length <= 80);
   assert.deepEqual(validateMotion(report.payload), report.payload);
-  assert.equal(report.payload.samples.at(-1).segment, 2);
+  assert.deepEqual([...new Set(report.payload.samples.map(frame=>frame.segment))], [0, 1]);
 });
 
 test('successful analysis uses an env key and constrained JSON prompt, retaining no raw video', async () => {
@@ -409,14 +410,14 @@ test('output schema keeps the supplied vocabulary and rejects missing prose or a
   const response = await handleApi(request(), { env, fetchImpl: async (_url, init) => {
     const body = JSON.parse(init.body);
     const schema = body.generationConfig.responseSchema.properties;
-    const allowed = labels.filter(label => !['유연한', '유려한'].includes(label));
+    const allowed = labels.filter(label => !['유연한', '유려한', '역동적인'].includes(label));
     assert.deepEqual(schema.impression.enum, allowed);
     assert.deepEqual(schema.qualities.items.enum, allowed);
     assert.deepEqual(schema.candidates.items.properties.label.enum, allowed);
     assert.equal(schema.observations.maxItems, 1);
     const { VISUAL_DEFINITIONS } = await rubricModule;
     assert.ok(labels.every(label => body.systemInstruction.parts[0].text.includes(label + ':' + VISUAL_DEFINITIONS[label])),
-      'All 50 labels have concise visual distinctions, even when an empirical gate excludes two from selection');
+      'All 50 labels have concise visual distinctions, even when an empirical gate excludes expressions without sufficient evidence');
     return goodResponse();
   } });
   assert.equal(response.status, 200);
@@ -459,14 +460,16 @@ test('request builder keeps source safeguards and concise visual definitions whi
   assert.equal(encoded.rows.length, 24, 'The transport still caps observations regardless of motion speed');
   assert.deepEqual(encoded, await providerMotion(data));
   assert.deepEqual(data, original, 'Provider encoding must not change the browser recording');
-  assert.ok(prompt.length <= 3500, 'Visual distinctions and score instructions remain bounded');
+  assert.ok(prompt.length <= 4200, 'Visual distinctions and score instructions remain bounded');
   assert.match(prompt, /영상·얼굴·음성·사용자 의도는 없다/);
   assert.match(prompt, /null은 미관측/);
   assert.match(prompt, /breakBefore=1/);
   assert.match(prompt, /pointer는 선만 읽고 example은 합성 예시임을 감상에 밝힌다/);
-  const { expressionRubric, ...encodedMotion } = encoded;
+  const { expressionRubric, motionEvidence, ...encodedMotion } = encoded;
   assert.ok(Buffer.byteLength(JSON.stringify(encodedMotion)) < Buffer.byteLength(JSON.stringify(compactMotion(data))));
-  assert.equal(expressionRubric.version, 'visual-rubric-v1');
+  assert.equal(expressionRubric.version, 'visual-rubric-v2');
+  assert.equal(motionEvidence.receivedFrames, data.samples.length);
+  assert.ok(Buffer.byteLength(JSON.stringify(body)) < 16000, 'Evidence must keep the request bounded');
   assert.ok(!JSON.stringify(body).includes(env.GEMINI_API_KEY));
 });
 
@@ -762,7 +765,7 @@ test('invalid or ineligible auxiliary candidates are omitted without inventing, 
   const analysis = (await response.json()).analysis;
   assert.deepEqual(analysis.candidates, [candidates[8]]);
   assert.deepEqual(analysis.qualities, ['매끄러운', '우아한']);
-  assert.deepEqual(analysis.rubric.eligible, { '유연한': false, '유려한': false });
+  assert.deepEqual(analysis.rubric.eligible, { '유연한': false, '유려한': false, '역동적인': false });
 });
 
 test('a disallowed main expression is rejected instead of being replaced by an invented alternative', async () => {
@@ -948,4 +951,14 @@ test('worker preflight and pointer input use the same validated contract', async
     body: JSON.stringify(pointer),
   });
   assert.equal((await handleApi(localPost, { env, allowLocal: true, fetchImpl: async () => goodResponse() })).status, 200);
+});
+
+test('local CPU captioning has its own bounded 180-second server budget', async t=>{
+ const {handleApi}=await handler;t.mock.timers.enable({apis:['setTimeout']});let settled=false;
+ // Hand input skips MotionGPT while exercising the configured local budget.
+ const value={source:'hand',handTarget:'wrist',durationMs:1000,sampleCount:2,metrics:{},samples:[{t:0,hands:[{id:1,joints:{wrist:[.2,.3],indexTip:[.3,.3]}}]},{t:1000,hands:[{id:1,joints:{wrist:[.4,.3],indexTip:[.5,.3]}}]}]};
+ const pending=handleApi(request(value),{env:{...env,MOTIONGPT_URL:'http://127.0.0.1:8765'},timeoutMs:999999,fetchImpl:()=>new Promise(()=>{})}).then(r=>{settled=true;return r;});
+ await new Promise(resolve=>setImmediate(resolve));t.mock.timers.tick(29000);await Promise.resolve();assert.equal(settled,false,'local configured pipeline is not cut off at the public budget');
+ t.mock.timers.tick(150999);await Promise.resolve();assert.equal(settled,false);t.mock.timers.tick(1);
+ const response=await pending;assert.equal(response.status,504);assert.equal((await response.json()).error.code,'AI_TIMEOUT');
 });

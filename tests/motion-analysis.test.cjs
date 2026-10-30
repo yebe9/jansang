@@ -423,16 +423,17 @@ test('webcam pauses break continuity even when paused time is removed from times
   assert.equal(result.payload.metrics.pathLength, 0);
   assert.equal(result.payload.metrics.directionChangeRate, 0);
   assert.equal(result.payload.metrics.trackedDurationMs, 2000);
-  assert.deepEqual(result.payload.samples.map((sample) => sample.segment), frames.map((frame) => frame.segment));
+  assert.deepEqual(result.payload.samples.map((sample) => sample.segment), frames.map((frame) => frame.segment - 1));
+  assert.equal(frames[0].segment, 1); // Transport IDs never mutate recording IDs.
 });
 
-test('missing or invalid webcam segments default to zero and valid values survive sampling', () => {
+test('missing or invalid webcam segments default to zero and valid boundaries survive sampling', () => {
   const frames = poseSeries((i) => [i / 100, 0.5], 101).map((frame, i) => ({
     ...frame, segment: i < 50 ? 1 : 2
   }));
   const samples = webcam(frames, 5000).payload.samples;
-  assert.equal(samples[0].segment, 1);
-  assert.equal(samples.at(-1).segment, 2);
+  assert.equal(samples[0].segment, 0);
+  assert.equal(samples.at(-1).segment, 1);
   const malformed = webcam([
     { t: 0, joints: {}, segment: -1 },
     { t: 50, joints: {}, segment: 1.5 },
@@ -471,7 +472,7 @@ test('keeps time-distributed original samples, endpoints, joints, and stroke bou
   assert.ok(result.payload.samples.some((sample) => sample.stroke === 2));
   const frames = poseSeries((i) => [i / 100, 0.5], 101);
   const pose = webcam(frames, 5000);
-  assert.equal(pose.payload.samples.length, 60);
+  assert.equal(pose.payload.samples.length, 80);
   assert.deepEqual(pose.payload.samples.at(-1), frames.at(-1));
 });
 
@@ -522,4 +523,89 @@ test('turns and tempo changes are measured independently of path coverage', () =
   assert.ok(switching.payload.metrics.tempoVariation > 0.8);
   const zigzag = pointer(pointSeries((i) => ({ x: i % 2 ? 0.7 : 0.3, y: 0.5 })));
   assert.ok(zigzag.payload.metrics.directionChangeRate > 10);
+});
+
+
+test('body sampling retains up to 80 measured frames while hand sampling stays at 60', () => {
+  const frames = fullBodySeries(() => ({}), 151, 66);
+  const body = webcam(frames, 10000);
+  assert.equal(body.payload.samples.length, 80);
+  assert.deepEqual(body.payload.samples[0], frames[0]);
+  assert.deepEqual(body.payload.samples.at(-1), frames.at(-1));
+  assert.equal(analyze(handRecording('indexTip', 151, 66)).payload.samples.length, 60);
+});
+
+test('full 22-joint world recordings fit the 100 KiB API cap without losing coordinates or segments', () => {
+  const frames = fullBodySeries(() => ({}), 151, 66).map((frame, i) => {
+    const joints = Object.fromEntries(Object.keys(frame.joints).map(name => [name, [0.12345, 0.67891]]));
+    const worldJoints = Object.fromEntries(Object.keys(joints).map(name =>
+      [name, [-19.12345, -18.23456, -17.34567]]));
+    return { ...frame, joints, worldJoints, segment: i < 75 ? 0 : 1 };
+  });
+  // A deliberately large, fully populated transport fixture; never a recording.
+  delete frames[0].joints.leftHeel;
+  delete frames[0].worldJoints.leftHeel;
+  const report = webcam(frames, 10000);
+  const { samples } = report.payload;
+  assert.ok(samples.length > 40 && samples.length < 80);
+  assert.ok(Buffer.byteLength(JSON.stringify(report.payload), 'utf8') <= 100 * 1024);
+  assert.equal(report.payload.sampleCount, frames.length);
+  assert.deepEqual(samples[0], frames[0]);
+  assert.deepEqual({ ...samples.at(-1), segment: frames.at(-1).segment }, frames.at(-1));
+  assert.ok(samples.some(frame => frame.segment === 0));
+  assert.ok(samples.some(frame => frame.segment === 1));
+  for (const sample of samples) {
+    const original = frames.find(frame => frame.t === sample.t);
+    assert.deepEqual({ ...sample, segment: original.segment }, original);
+  }
+});
+
+
+test('body thinning preserves an occlusion or pause even when that exact frame is skipped', () => {
+  for (const kind of ['screen', 'world', 'pause']) {
+    const frames = fullBodySeries(() => ({}), 151, 66).map(frame => ({
+      ...frame, worldJoints: { leftAnkle: [0.1, 0.8, 0.1] }
+    }));
+    if (kind === 'screen') delete frames[75].joints.leftAnkle;
+    if (kind === 'world') delete frames[75].worldJoints.leftAnkle;
+    if (kind === 'pause') frames[75].segment = 1;
+    const samples = webcam(frames, 10000).payload.samples;
+    assert.equal(samples.length, 80);
+    assert.ok(!samples.some(frame => frame.t === frames[75].t));
+    const before = samples.filter(frame => frame.t < frames[75].t).at(-1);
+    const after = samples.find(frame => frame.t > frames[75].t);
+    assert.notEqual(before.segment, after.segment, kind);
+    assert.equal(frames.at(-1).segment, 0);
+    assert.ok(samples.every(frame => frame.segment <= 10000));
+  }
+});
+
+test('body transport retains long gaps as separate measured runs', () => {
+  const frames = fullBodySeries(() => ({}), 121, 75).map((frame, i) => ({
+    ...frame, t: frame.t + (i >= 60 ? 500 : 0)
+  }));
+  const samples = webcam(frames, 10000).payload.samples;
+  const before = samples.filter(frame => frame.t < frames[60].t).at(-1);
+  const after = samples.find(frame => frame.t >= frames[60].t);
+  assert.notEqual(before.segment, after.segment);
+  assert.equal(frames[60].segment, 0);
+});
+
+
+test('optional finger and heel visibility does not fragment a valid full-body run', () => {
+  const frames = fullBodySeries(() => ({}), 151, 66).map(frame => ({
+    ...frame, worldJoints: Object.fromEntries(Object.keys(frame.joints).map(name => [name, [0.1, 0.2, 0.3]]))
+  }));
+  for (const name of ['leftPinky', 'leftHeel']) {
+    delete frames[76].joints[name];
+    delete frames[76].worldJoints[name];
+  }
+  const samples = webcam(frames, 10000).payload.samples;
+  const missing = samples.find(frame => frame.t === frames[76].t);
+  assert.ok(missing);
+  assert.equal(missing.joints.leftPinky, undefined);
+  assert.equal(missing.worldJoints.leftHeel, undefined);
+  assert.ok(samples.every(frame => frame.segment === 0));
+  assert.equal(samples[0].joints.leftPinky.length, 2);
+  assert.equal(samples.at(-1).worldJoints.leftHeel.length, 3);
 });
