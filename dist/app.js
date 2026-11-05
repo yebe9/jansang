@@ -7,6 +7,7 @@
   const dialog = $('start-dialog');
   const resultDialog = $('result-dialog');
   const analysisDialog = $('analysis-dialog');
+  const shareDialog = $('share-dialog');
   const workspace = $('workspace');
   const LIMIT = 10000;
   const AUTO_START_MS = 3000;
@@ -72,6 +73,12 @@
   let similarityMessage = '';
   let similarityController = null;
   let similarityVersion = 0;
+  let traceImagePromise = null;
+  let sharedTrace = null;
+  let shareController = null;
+  let shareVersion = 0;
+  let shareBusy = false;
+  let exportBusy = false;
 
   let gl, program, buffer, position, color, edge, opacity;
   let lost = false;
@@ -241,7 +248,8 @@
     view = next;
     document.body.dataset.view = next;
     const result = next === 'result';
-    for (const id of ['result-heading','transport','result-caption']) $(id).hidden = !result;
+    for (const id of ['result-heading','transport']) $(id).hidden = !result;
+    $('result-caption').hidden = !result || !isExample;
     $('result-panel').hidden = !result || !resultDialog.open;
     $('reopen-result').hidden = !result || resultDialog.open;
     $('record-dock').hidden = next !== 'drawing';
@@ -286,7 +294,8 @@
     const semanticByLabel=new Map((similarityResult?.results||[]).map(item=>[item.label,item]));
     const ranked=candidates.map((candidate,index)=>({...candidate,aiRank:index+1,similarity:semanticByLabel.get(candidate.label)?.similarity??null}));
     $('analysis-candidates').hidden = !analysis;
-    $('similarity-status').textContent = similarityMessage || (analysis ? 'AI가 움직임에서 고른 순서입니다. 내 표현을 남기면 각 인상과 내 의도의 의미 유사도를 계산합니다.' : '');
+    $('similarity-status').textContent = similarityMessage;
+    $('similarity-status').hidden = !similarityMessage;
     $('candidate-list').replaceChildren(...ranked.map((item,index)=>{
       const li=document.createElement('li');li.className='similarity-row';
       const heading=document.createElement('div');heading.className='similarity-row-heading';
@@ -420,7 +429,7 @@
     if(!query||!Array.isArray(candidates)||!candidates.length){similarityMessage='';updateComparison();queueAutoSave(600);return;}
     if(!window.GhostingSemantic){similarityMessage='한국어 유사도 모델을 준비하지 못했어요.';updateComparison();queueAutoSave(600);return;}
     const controller=new AbortController();similarityController=controller;
-    similarityMessage='한국어 표현의 의미를 비교하고 있어요. 처음에는 단어 모델을 불러옵니다.';updateComparison();
+    similarityMessage='의미 유사도를 계산하고 있어요.';updateComparison();
     try{
       const result=await window.GhostingSemantic.rank(query,candidates,{limit:5,signal:controller.signal});
       if(version!==similarityVersion||controller.signal.aborted)return;
@@ -431,7 +440,7 @@
           similarity:typeof compared?.similarity==='number'&&Number.isFinite(compared.similarity)?compared.similarity:null,
           rawCosine:typeof compared?.rawCosine==='number'&&Number.isFinite(compared.rawCosine)?compared.rawCosine:null};
       })};
-      similarityMessage=(result.results||[]).length?(result.queryCoverage<1?'일부 단어가 사전에 없어 확인되는 단어로 비교했습니다. ':'')+'내 의도와 의미 유사도: 단어 벡터의 코사인 값입니다. AI 순위는 바뀌지 않으며 감정의 정확도나 확률이 아닙니다.':'내 의도의 단어 벡터를 찾지 못해 의미 유사도를 측정할 수 없어요. AI가 고른 다섯 인상은 그대로입니다.';
+      similarityMessage=(result.results||[]).length ? '' : '유사도를 계산할 수 없는 표현이에요.';
     }catch(error){if(version!==similarityVersion||controller.signal.aborted)return;similarityMessage='유사도를 계산하지 못했어요. '+error.message;}
     finally{if(version===similarityVersion){updateComparison();queueAutoSave(400);}}
   }
@@ -477,6 +486,7 @@
   }
 
   function clearAnalysis() {
+    resetTraceShare();
     if(view==='result')queueAutoSave();
     takeId++;
     analysisController?.abort();
@@ -614,13 +624,18 @@
 
     $('play').disabled = lost || !hasPoints;
     $('timeline').disabled = lost || !hasPoints;
-    $('export').disabled = lost || !hasPoints;
+    $('export').disabled = lost || !hasPoints || exportBusy;
+    $('share-image').disabled = lost || !hasPoints || shareBusy;
     $('playback-speed').disabled = lost || !hasPoints;
     $('pause-icon').dataset.state = mode === 'paused' ? 'paused' : 'recording';
     $('pause').setAttribute('aria-label',mode === 'paused' ? '이어 기록' : '일시정지');
     $('pause-label').textContent = mode === 'paused' ? '이어 기록' : '일시정지';
-    $('record-time').textContent = timestamp(LIMIT - cursor);
-    $('record-progress').value = cursor;
+    const preparing = view === 'drawing' && isCameraInput() && !cameraRequested && !hasPoints;
+    $('record-clock-label').textContent = preparing ? '인식 준비' : '남은 시간';
+    $('record-time').textContent = preparing ? String(Math.max(1,Math.ceil((AUTO_START_MS-autoStartElapsed)/1000))) : timestamp(LIMIT - cursor);
+    $('record-dock').dataset.phase = preparing ? 'preparing' : 'recording';
+    $('record-progress').max = preparing ? AUTO_START_MS : LIMIT;
+    $('record-progress').value = preparing ? autoStartElapsed : cursor;
     $('play-icon').dataset.state = mode === 'playing' ? 'playing' : 'paused';
     $('play').setAttribute('aria-label',mode === 'playing' ? '재생 일시정지' : '움직임 재생');
     $('current-time').textContent = timestamp(cursor);
@@ -659,7 +674,7 @@
         ? `양손의 ${handTargetLabel()}으로 공중에 그려보세요 · 두 손이 모두 안 보이면 잠시 멈춤`
         : '양손·양발·몸의 중심으로 잔상을 남겨보세요 · 전신이 보여야 기록됩니다';
       $('camera-status').textContent = !cameraRequested && cameraReady && cameraKind !== 'error'
-        ? (autoStartElapsed > 0 ? Math.ceil((AUTO_START_MS-autoStartElapsed)/1000)+'초 뒤 자동 시작합니다.'
+        ? (autoStartElapsed > 0 ? '인식 중이에요. 잠시 그대로 보여주세요.'
           : hand ? '한 손 이상을 3초 동안 보여주면 자동으로 시작합니다.' : '어깨부터 발끝까지 3초 동안 보이면 자동으로 시작합니다.')
         : cameraMessage;
       $('camera-select').disabled = cameraKind === 'loading' || hasPoints || cameraRequested;
@@ -679,7 +694,7 @@
         : '움직임을 만날 준비 중';
       $('guide-copy').textContent = cameraKind === 'error' ? '왼쪽에서 카메라를 바꾸거나 다시 연결할 수 있어요.'
         : cameraRequested ? (captureSource === 'hand' ? '손을 화면 안으로 옮겨주세요. 한 손 이상 보이면 시간이 흐릅니다.' : '어깨부터 양발까지 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.')
-        : (autoStartElapsed > 0 ? Math.ceil((AUTO_START_MS-autoStartElapsed)/1000)+'초 뒤 자동 시작'
+        : (autoStartElapsed > 0 ? '카운트다운이 끝나면 자동으로 기록합니다.'
           : captureSource === 'hand' ? '한 손 이상을 3초 동안 보여주세요. 버튼 없이 시작합니다.' : '어깨부터 발끝까지 3초 동안 보여주세요. 버튼 없이 시작합니다.');
     } else {
       $('guide-title').textContent = '움직임으로 채워질 공간';
@@ -962,13 +977,16 @@
     } else pauseRecording();
   }
 
+  function setResultCaption(message) {
+    $('result-caption').textContent = isExample ? message : '';
+    $('result-caption').hidden = !isExample || view !== 'result';
+  }
+
   function showResult() {
     setView('result');
     $('result-duration').textContent=(duration/1000).toFixed(1);
     $('result-strokes').textContent=new Set(points.map(p=>p.stroke)).size;
-    $('result-caption').textContent=isExample ? '합성 예시입니다. 재생하며 움직임의 흐름을 살펴보세요.'
-      : captureSource === 'hand' ? `보이는 각 손의 ${handTargetLabel()}이 남긴 잔상입니다. 손마다 자취를 나눠 기록했어요.`
-      : '양손·양발·몸의 중심이 남긴 잔상입니다. 얼굴 좌표는 동작 분석에 포함하지 않았어요.';
+    setResultCaption('합성 예시입니다. 재생하며 움직임의 흐름을 살펴보세요.');
     openResult();
     $('result-panel').scrollTop = 0;
     workspace.scrollTop = 0;
@@ -1021,13 +1039,91 @@
     if(lost || view!=='result' || !points.length) return;
     if(mode==='playing') {
       mode='replay-paused';
-      $('result-caption').textContent='잠시 멈춘 잔상입니다. 재생 버튼을 누르면 이어집니다.';
+      setResultCaption('잠시 멈춘 잔상입니다. 재생 버튼을 누르면 이어집니다.');
     } else {
       if(cursor>=duration) cursor=0;
       mode='playing';lastFrame=performance.now();
-      $('result-caption').textContent='기록했던 리듬으로 재생 중입니다. 일시정지한 시간은 제외됩니다.';
+      setResultCaption('기록했던 리듬으로 재생 중입니다. 일시정지한 시간은 제외됩니다.');
     }
     dirty=true;refresh();
+  }
+
+  function getTraceImage() {
+    if (!window.GhostingImage) return Promise.reject(new Error('이미지 저장 기능을 준비하지 못했어요. 새로고침해 주세요.'));
+    if (!traceImagePromise) {
+      try {
+        const promise=Promise.resolve(window.GhostingImage.create({points:points.map(p=>({...p})),captureAspect,strokeWidth}));
+        traceImagePromise=promise;
+        promise.catch(()=>{if(traceImagePromise===promise)traceImagePromise=null;});
+      } catch(error) { return Promise.reject(error); }
+    }
+    return traceImagePromise;
+  }
+
+  function closeShare(restoreFocus=true) {
+    if (shareController) { shareVersion++;shareController.abort();shareController=null; }
+    shareBusy=false;
+    if (shareDialog.open) shareDialog.close();
+    if (restoreFocus && view==='result') $('share-image').focus({preventScroll:true});
+    refresh();
+  }
+
+  function resetTraceShare() {
+    shareVersion++;shareController?.abort();shareController=null;shareBusy=false;exportBusy=false;
+    if(shareDialog.open)shareDialog.close();
+    sharedTrace=null;traceImagePromise=null;
+    $('share-qr').replaceChildren();$('share-qr').hidden=true;
+    $('share-open').hidden=true;$('share-open').removeAttribute('href');
+    $('share-expiry').textContent='';$('share-status').textContent='';$('share-retry').hidden=true;
+    $('export-status').textContent='';
+  }
+
+  function showShare(value) {
+    window.GhostingShare.drawQR($('share-qr'),value.url);
+    $('share-qr').hidden=false;
+    $('share-open').href=value.url;$('share-open').hidden=false;
+    const date=new Date(value.expiresAt);
+    const expiry=new Intl.DateTimeFormat('ko-KR',{timeZone:'Asia/Seoul',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(date);
+    $('share-expiry').textContent=expiry+'까지 · 24시간';
+    $('share-status').textContent='QR을 스캔해 내 폰에 저장하세요.';
+    $('share-retry').hidden=true;
+  }
+
+  async function shareTraceImage() {
+    if(view!=='result'||lost||!points.length||shareBusy)return;
+    if(!shareDialog.open)shareDialog.showModal();
+    if(sharedTrace&&Date.parse(sharedTrace.expiresAt)>Date.now()){showShare(sharedTrace);return;}
+    const id=takeId,version=++shareVersion,controller=new AbortController();
+    shareController=controller;shareBusy=true;
+    $('share-qr').replaceChildren();$('share-qr').hidden=true;$('share-open').hidden=true;$('share-expiry').textContent='';
+    $('share-retry').hidden=true;$('share-status').textContent='잔상 이미지와 QR을 준비하고 있어요.';refresh();
+    try {
+      if(!window.GhostingShare)throw new Error('공유 기능을 준비하지 못했어요. 새로고침해 주세요.');
+      const blob=await getTraceImage();
+      if(id!==takeId||version!==shareVersion||controller.signal.aborted)return;
+      const value=await window.GhostingShare.create(blob,{apiBase:window.JANSANG_CONFIG?.shareBase,signal:controller.signal});
+      if(id!==takeId||version!==shareVersion||controller.signal.aborted)return;
+      showShare(value);sharedTrace=value;
+    } catch(error) {
+      if(id!==takeId||version!==shareVersion||controller.signal.aborted)return;
+      $('share-status').textContent=error.message||'QR을 만들지 못했어요. 다시 시도해 주세요.';
+      $('share-retry').hidden=false;
+    } finally {
+      if(id===takeId&&version===shareVersion){shareBusy=false;shareController=null;refresh();}
+    }
+  }
+
+  async function downloadTraceImage() {
+    if(lost||!points.length||exportBusy)return;
+    const id=takeId;exportBusy=true;$('export-status').textContent='이미지를 준비하고 있어요.';refresh();
+    try {
+      const blob=await getTraceImage();if(id!==takeId)return;
+      const url=URL.createObjectURL(blob),link=document.createElement('a');
+      link.href=url;link.download='ghosting-'+(captureId||Date.now())+'.png';link.click();
+      setTimeout(()=>URL.revokeObjectURL(url),10000);
+      $('export-status').textContent='잔상 PNG를 저장했어요.';announce('전체 잔상 PNG를 저장했습니다.');
+    } catch(error) {if(id===takeId)$('export-status').textContent=error.message||'이미지를 저장하지 못했어요.';}
+    finally {if(id===takeId){exportBusy=false;refresh();}}
   }
 
   function loadExample() {
@@ -1088,7 +1184,7 @@
   $('timeline').addEventListener('input',()=>{
     if(view!=='result') return;
     mode='replay-paused';cursor=Number($('timeline').value)/1000*duration;dirty=true;refresh();render();
-    $('result-caption').textContent='선택한 순간의 잔상입니다. 재생 버튼을 누르면 이어집니다.';
+    setResultCaption('선택한 순간의 잔상입니다. 재생 버튼을 누르면 이어집니다.');
   });
   $('playback-speed').addEventListener('change',event=>{ playbackRate=Number(event.target.value); });
   $('intent-short').addEventListener('compositionstart',()=>{ intentComposing = true; });
@@ -1096,22 +1192,16 @@
   $('intent-short').addEventListener('input',event=>{ if (!event.isComposing) commitIntent(); });
   $('intent-detail').addEventListener('input',()=>{updateComparison();queueAutoSave(600);updateSimilarity();});
   $('analyze-button').addEventListener('click',requestAI);
-  $('export').addEventListener('click',()=>{
-    if(lost || !points.length) return;
-    render();
-    canvas.toBlob(blob=>{
-      if(!blob) { announce('이미지 저장에 실패했습니다. 다시 시도해 주세요.');return; }
-      const url=URL.createObjectURL(blob);
-      const link=document.createElement('a');link.href=url;link.download='ghosting-'+Date.now()+'.png';link.click();
-      setTimeout(()=>URL.revokeObjectURL(url),10000);
-      announce('잔상 PNG를 저장했습니다.');
-    },'image/png');
-  });
+  $('export').addEventListener('click',downloadTraceImage);
+  $('share-image').addEventListener('click',shareTraceImage);
+  $('share-retry').addEventListener('click',shareTraceImage);
+  $('share-close').addEventListener('click',()=>closeShare());
+  shareDialog.addEventListener('cancel',event=>{event.preventDefault();closeShare();});
 
   // 팝업은 native dialog가 포커스를 가두고 Escape 닫기를 처리한다.
   // 기록/결과 단축키는 각각 해당 화면에서만 동작한다.
   document.addEventListener('keydown',event=>{
-    if(dialog.open || analysisDialog.open || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+    if(dialog.open || analysisDialog.open || shareDialog.open || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
     if(/^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(event.target.tagName) || event.target.isContentEditable) return;
     if(event.code==='Space') {
       event.preventDefault();
@@ -1130,10 +1220,11 @@
     }
     if(mode==='playing') {
       mode='replay-paused';refresh();
-      $('result-caption').textContent='화면을 벗어나 재생을 멈췄어요. 재생 버튼으로 이어보세요.';
+      setResultCaption('화면을 벗어나 재생을 멈췄어요. 재생 버튼으로 이어보세요.');
     }
   });
   window.addEventListener('pagehide',()=>{
+    closeShare(false);
     queueAutoSave();
     pauseRecording();
     stopCamera();
@@ -1170,7 +1261,7 @@
       cursor=Math.min(duration,cursor+(now-lastFrame)*playbackRate);dirty=true;
       if(cursor>=duration) {
         mode='complete';
-        $('result-caption').textContent='재생을 마쳤어요. 같은 움직임에서 어떤 느낌이 전해지나요?';
+        setResultCaption('재생을 마쳤어요. 같은 움직임에서 어떤 느낌이 전해지나요?');
         announce('재생을 마쳤습니다.');
       }
       refresh();

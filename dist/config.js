@@ -4,5 +4,6 @@
    apiBase에는 공개 서버의 HTTPS 주소만 사용합니다. */
 window.JANSANG_CONFIG = Object.freeze({
     apiBase: 'https://jansang-motion-api.jansang.workers.dev',
-    logBase: 'https://ghosting-logbook.jansang.workers.dev'
+    logBase: 'https://ghosting-logbook.jansang.workers.dev',
+    shareBase: 'https://ghosting-image-share.jansang.workers.dev'
 });

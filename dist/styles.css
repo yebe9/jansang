@@ -371,3 +371,20 @@ body[data-view=drawing] .camera-panel{left:28px;top:116px;width:var(--camera-col
 @media(max-width:900px){.start-log-link{right:18px;top:16px}}
 
 @media(prefers-reduced-motion:no-preference){#start-dialog[open]{animation:fade-in .3s ease-out}}
+
+/* A private recording stays private; only the chosen trace PNG receives a temporary link. */
+.share-button{width:100%;display:flex;justify-content:center;align-items:center;gap:18px;min-height:48px;margin-top:10px;padding:13px 18px;border:1px solid #dba88980;border-radius:6px;background:#283c3c;color:#e3b899;font-size:13px;font-weight:600}
+.share-button span{font-size:18px;font-weight:400}
+.export-status:empty{display:none}.export-status{font-size:10px;line-height:1.7;color:#d0b49c;margin:4px 0 0}
+.share-dialog{width:430px;padding:35px 32px 25px;background:#1c2b30;text-align:center;color:#e1e8e4}
+.share-dialog h2{font-size:26px;letter-spacing:-1px;font-weight:500;margin:14px 0 10px}
+.share-intro{font-size:12px;line-height:1.8;color:#a9c0b4;margin:0 0 22px}
+.share-qr{margin:0 auto 18px;width:min(272px,100%);aspect-ratio:1;border-radius:12px;background:#e2eadf;padding:12px}
+.share-qr svg{width:100%;height:100%;display:block}
+.share-status{font-size:12px;line-height:1.8;color:#c7d9ce;min-height:22px;margin:13px 0}
+.share-expiry{font:11px/1.7 var(--mono);color:#a4b9aa;margin:8px 0 16px}
+.share-expiry:empty{display:none}.share-open{display:inline-block;color:#e5b79a;font-size:12px;text-decoration:none;border-bottom:1px solid #d6a48366;padding:5px 0}
+.share-note{font-size:10px;line-height:1.8;color:#8ea899;margin:21px 0 0}
+.record-dock[data-phase=preparing]{border-color:#a6c2ab70}.record-dock[data-phase=preparing] .record-clock b{color:#bcd9bc}
+#result-caption:empty{display:none}
+@media(max-width:600px){.share-dialog{padding:34px 23px 23px}.share-dialog h2{font-size:23px}.share-qr{width:min(260px,100%)}}

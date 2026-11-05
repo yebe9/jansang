@@ -1,0 +1,33 @@
+name = "ghosting-image-share"
+main = "worker.mjs"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGINS = "https://yebe9.github.io,http://127.0.0.1:4173,http://localhost:4173"
+
+[[d1_databases]]
+binding = "SHARE_DB"
+database_name = "ghosting-image-shares"
+# Dedicated public-image database; never use the private logbook database.
+database_id = "6ef0dae7-9dda-4045-9ba2-a3b816aeccb9"
+
+[[ratelimits]]
+name = "SHARE_LIMITER"
+namespace_id = "102005"
+simple = { limit = 6, period = 60 }
+
+[[ratelimits]]
+name = "TOTAL_SHARE_LIMITER"
+namespace_id = "102006"
+simple = { limit = 30, period = 60 }
+
+[triggers]
+crons = ["0 * * * *"]
+# Do not persist public QR link tokens in Worker invocation logs.
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = false
+invocation_logs = false

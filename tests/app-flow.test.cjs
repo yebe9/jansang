@@ -15,7 +15,7 @@ const flush = async () => { for (let i = 0; i < 24; i++) await Promise.resolve()
 // A deliberately small event surface: rendering and camera hardware are mocked,
 // while app.js, motion measurements, event handlers and request bodies are real.
 function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, popupBlocked = false,
-  automaticAI = false, hostname = '127.0.0.1', apiBase = '', logBase = '', privateStorage = false, semanticRank } = {}) {
+  automaticAI = false, hostname = '127.0.0.1', apiBase = '', logBase = '', shareBase = '', privateStorage = false, semanticRank, imageCreate, shareCreate } = {}) {
   let now = 0;
   let animation;
   const timers = new Map();
@@ -24,6 +24,7 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
   const calls = [];
   const cameras = [];
   const recorders = [], popups = [], lifecycle = [];
+  const imageCalls = [], shareCalls = [], qrCalls = [], createdElements = [];
   let captureCounter = 0;
   const failures = [];
   const noop = () => {};
@@ -100,7 +101,7 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
     return elements.get(id);
   };
   document.querySelectorAll = selector => selector === '.feelings button' ? feelings : [];
-  document.createElement = tag => new Element(tag);
+  document.createElement = tag => { const element = new Element(tag); createdElements.push(element); return element; };
 
   class Camera {
     constructor(options) {
@@ -144,7 +145,18 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
   window.devicePixelRatio = 1;
   window.scrollTo = noop;
   window.JansangPoseCamera = Camera;
-  window.JANSANG_CONFIG = { apiBase,logBase,autoAnalyze:automaticAI };
+  window.JANSANG_CONFIG = { apiBase,logBase,shareBase,autoAnalyze:automaticAI };
+  if (imageCreate) window.GhostingImage = {create(input) {
+    imageCalls.push(copy(input));
+    return imageCreate(input);
+  }};
+  if (shareCreate) window.GhostingShare = {
+    create(blob,options) { shareCalls.push({blob,options}); return shareCreate(blob,options); },
+    drawQR(target,url) {
+      qrCalls.push(url);
+      const code = new Element('svg');code.dataset.url = url;target.replaceChildren(code);
+    },
+  };
   if(semanticRank)window.GhostingSemantic={rank:semanticRank,load:async()=>{}};
   const storedLogs=new Map(), logClients=[];
   if(privateStorage)window.GhostingPrivateLogs={Client:class extends PrivateLogClient {
@@ -206,6 +218,7 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
   assert.equal(failures.length, 0, 'WebGL initialization succeeded with the mock');
   return {
     elements, document, window, cameras, recorders, popups, lifecycle, reports, calls, timers,storedLogs,logClients,
+    imageCalls,shareCalls,qrCalls,createdElements,
     async runTimers(delay){for(const [id,timer] of [...timers])if(timer.delay===delay){timers.delete(id);timer.callback();}await flush();},
     get: id => elements.get(id),
     click: id => elements.get(id).click(),
@@ -442,7 +455,8 @@ test('choosing a camera replaces the stream and ignores old callbacks, then lock
   original.emit(500, landmarks());
   assert.equal(select.value, 'usb-camera');
   assert.equal(select.children.length, 3);
-  assert.match(app.get('camera-status').textContent, /자동 시작/);
+  assert.match(app.get('camera-status').textContent, /인식 중/);
+  assert.equal(app.get('record-clock-label').textContent,'인식 준비');
   assert.equal(app.get('camera-retry').hidden, true);
   assert.equal(app.get('point-count').textContent, countBefore, 'Replaced camera cannot append a pose');
 
@@ -651,7 +665,8 @@ test('default hand mode replaces mouse input and records one fingertip trail wit
   assert.equal(report.payload.handTarget, 'indexTip');
   assert.ok(report.payload.metrics.pathLength > 0.1);
   assert.equal(camera.stopped, true);
-  assert.match(app.get('result-caption').textContent, /검지 끝/);
+  assert.equal(app.get('result-caption').textContent, '');
+  assert.equal(app.get('result-caption').hidden, true);
 });
 
 test('wrist selection records the wrist instead of moving fingertips and is locked during a take', async () => {
@@ -666,7 +681,8 @@ test('wrist selection records the wrist instead of moving fingertips and is lock
   assert.equal(report.payload.handTarget, 'wrist');
   assert.ok(input.points.every(p => p.x === 0.45 && p.y === 0.75));
   assert.equal(report.payload.metrics.pathLength, 0, 'Moving only the finger does not become wrist motion');
-  assert.match(app.get('result-caption').textContent, /손목/);
+  assert.equal(app.get('result-caption').textContent, '');
+  assert.equal(app.get('result-caption').hidden, true);
 });
 
 test('hand loss freezes recording and resumes in a fresh segment without a connecting line', async () => {
@@ -1235,7 +1251,7 @@ test('TOP 5 bars display semantic cosine values rather than provider suitability
  assert.equal(rows[0].children[1].children[0].style.getPropertyValue('--similarity'),'12');assert.match(rows[0].children[1].className,/is-negative/);
  assert.equal(rows[1].children[0].children[0].textContent,'#2 날카로운');assert.equal(rows[1].children[0].children[1].textContent,'유사도 31.5');assert.equal(rows[1].children[1].children[0].style.getPropertyValue('--similarity'),'31.5');
  assert.equal(app.get('ai-word').textContent,result.analysis.impression,'Ranking intent similarity does not replace the AI movement impression');
- assert.equal(app.calls.length,1);assert.ok(!app.calls[0].options.body.includes('빠름'));assert.match(app.get('similarity-status').textContent,/코사인/);
+ assert.equal(app.calls.length,1);assert.ok(!app.calls[0].options.body.includes('빠름'));assert.equal(app.get('similarity-status').textContent,'');assert.equal(app.get('similarity-status').hidden,true);
 });
 
 test('rapid intent changes and fresh takes cannot display stale semantic results',async()=>{
@@ -1307,7 +1323,9 @@ test('a single continuously tracked hand starts automatically at three seconds a
  assert.equal(app.get('camera-record'),undefined);assert.equal(app.recorders.length,0);assert.equal(app.get('finish').disabled,true);
  handFrames(camera,0,2900,7);
  assert.equal(app.recorders.length,0,'2.9 seconds must not start video or movement recording');assert.equal(app.get('finish').disabled,true);
- assert.match(app.get('record-time').textContent,/10\.0/,'Recognition warm-up is outside the ten-second recording');
+ assert.equal(app.get('record-time').textContent,'1','The large clock counts recognition down before recording');
+ assert.equal(app.get('record-clock-label').textContent,'인식 준비');
+ assert.equal(app.get('record-progress').max,3000);assert.equal(app.get('record-progress').value,2900);
  camera.emitHands(3000,oneHand(7));assert.equal(app.recorders.length,1);assert.equal(app.get('finish').disabled,false);
  assert.match(app.get('stage-status').textContent,/REC/);assert.match(app.get('record-time').textContent,/10\.0/);
  camera.emitHands(4300,oneHand(7));assert.match(app.get('record-time').textContent,/0?8\.7/);
@@ -1398,4 +1416,226 @@ test('returning home cancels the old interpretation and never renders its late r
  await app.click('analysis-cancel');await app.click('home');assert.equal(app.calls[0].options.signal.aborted,true);
  resolve(ok(aiResult));await flush();
  assert.equal(app.document.body.dataset.view,'intro');assert.equal(app.get('result-dialog').open,false);assert.equal(app.get('analysis-dialog').open,false);assert.equal(app.get('analysis-qualities').children.length,0);assert.equal(app.get('ai-word').textContent,'움직임을 기다려요');
+});
+
+
+test('the same large clock counts hand and full-body recognition 3, 2, 1 before switching to ten recording seconds',async()=>{
+ for(const hand of [true,false]){
+  const app=createApp();const camera=await prepareAutoCamera(app,{hand});
+  assert.equal(app.get('record-clock-label').textContent,'인식 준비');assert.equal(app.get('record-time').textContent,'3');
+  const checks=new Map([[0,'3'],[900,'3'],[1000,'2'],[1900,'2'],[2000,'1'],[2900,'1'],[3000,'10.0']]);
+  for(let t=0;t<=3000;t+=100){
+   if(hand)camera.emitHands(t,oneHand(23));else camera.emit(t,landmarks());
+   if(checks.has(t))assert.equal(app.get('record-time').textContent,checks.get(t),(hand?'hand':'body')+' at '+t);
+   assert.equal(app.get('record-clock-label').textContent,t<3000?'인식 준비':'남은 시간');
+   assert.equal(app.get('record-dock').dataset.phase,t<3000?'preparing':'recording');
+   assert.equal(app.get('record-progress').max,t<3000?3000:10000);
+   assert.equal(app.get('record-progress').value,t<3000?t:0);
+  }
+  assert.equal(app.recorders.length,1);
+ }
+});
+
+test('the large recognition countdown resets on missing observations and frame gaps, while manual pause keeps recording time',async()=>{
+ for(const hand of [true,false]){
+  const app=createApp();const camera=await prepareAutoCamera(app,{hand});
+  const emit=t=>hand?camera.emitHands(t,oneHand()):camera.emit(t,landmarks());
+  for(let t=0;t<=2500;t+=100)emit(t);assert.equal(app.get('record-time').textContent,'1');
+  if(hand)camera.emitHands(2600,[]);else{const partial=landmarks();partial[31].visibility=0;camera.emit(2600,partial);}
+  assert.equal(app.get('record-time').textContent,'3');assert.equal(app.get('record-progress').value,0);
+  for(let t=2700;t<=3900;t+=100)emit(t);assert.equal(app.get('record-time').textContent,'2');
+  emit(4400);assert.equal(app.get('record-time').textContent,'3','A gap restarts the displayed preparation time');
+  for(let t=4500;t<=7400;t+=100)emit(t);assert.equal(app.get('record-time').textContent,'10.0');
+  emit(8400);assert.equal(app.get('record-time').textContent,'09.0');await app.click('pause');
+  emit(10000);assert.equal(app.get('record-time').textContent,'09.0');assert.equal(app.get('record-clock-label').textContent,'남은 시간');
+  assert.equal(app.get('record-progress').max,10000);assert.equal(app.get('record-progress').value,1000);
+ }
+});
+
+test('successful similarities keep the five scores but omit the removed explanatory prose, including partial dictionary matches',async()=>{
+ const result=copy(aiResult);result.analysis.candidates=[{label:'날카로운',score:90,evidence:'선명한 방향 변화'},{label:'차분한',score:70,evidence:'짧은 멈춤'}];
+ const app=createApp({automaticAI:true,fetchResponse:async()=>ok(result),semanticRank:async(_query,candidates)=>({method:'fasttext-cosine',model:'fixture',queryCoverage:.5,results:candidates.map((candidate,i)=>({...candidate,similarity:42-i,rawCosine:.42-i/100})),missingTokens:['새단어']})});
+ const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
+ assert.equal(app.get('result-caption').hidden,true);assert.equal(app.get('result-caption').textContent,'');
+ app.get('intent-short').value='빠른';await app.get('intent-short').dispatch('input');await flush();
+ assert.equal(app.get('similarity-status').textContent,'');assert.equal(app.get('similarity-status').hidden,true);
+ assert.equal(app.get('candidate-list').children.length,2);assert.equal(app.get('candidate-list').children[0].children[0].children[1].textContent,'유사도 42.0');
+ await app.click('play');assert.equal(app.get('result-caption').textContent,'');assert.equal(app.get('result-caption').hidden,true);
+ await app.click('play');assert.equal(app.get('result-caption').textContent,'');assert.equal(app.get('result-caption').hidden,true);
+});
+
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return {promise,resolve,reject};
+}
+
+const sharedImage = (name, expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()) => ({
+  url: `https://ghosting-share.example/share/${name}`,
+  expiresAt,
+});
+
+async function finishHandResult(app, offset = 0) {
+  const camera = await app.startHand();
+  recordHand(camera,1000,21,offset);
+  await app.click('finish');
+  await flush();
+  assert.equal(app.document.body.dataset.view,'result');
+  return app.reports.at(-1).input;
+}
+
+test('phone sharing starts only on an explicit action and reuses the same image and QR after intention edits',async()=>{
+  const image = new Blob(['trace pixels only'],{type:'image/png'});
+  const published = sharedImage('first-take');
+  const app = createApp({shareBase:'https://ghosting-share.example',imageCreate:async()=>image,shareCreate:async()=>published});
+  const recording = await finishHandResult(app);
+  assert.equal(app.imageCalls.length,0,'Merely showing results does not create or upload a public image');
+  assert.equal(app.shareCalls.length,0);
+  assert.equal(app.get('share-dialog').open,false);
+  app.get('intent-short').value='날카로운';app.get('intent-detail').value='This private intention must not be shared.';
+  await app.get('intent-short').dispatch('input');
+  app.get('timeline').value='100';await app.get('timeline').dispatch('input');
+  await app.click('share-image');
+  assert.equal(app.imageCalls.length,1);assert.equal(app.shareCalls.length,1);
+  assert.deepEqual(app.imageCalls[0].points,recording.points,'The image includes the complete take even at an early playback position');
+  assert.deepEqual(Object.keys(app.imageCalls[0]).sort(),['captureAspect','points','strokeWidth']);
+  assert.equal(app.imageCalls[0].strokeWidth,3.5);
+  assert.equal(app.shareCalls[0].blob,image,'Only the rendered PNG is passed to the public sharing client');
+  assert.deepEqual(Object.keys(app.shareCalls[0].options).sort(),['apiBase','signal']);
+  assert.equal(app.shareCalls[0].options.apiBase,'https://ghosting-share.example');
+  assert.equal(app.shareCalls[0].options.signal.aborted,false);
+  assert.equal(app.get('share-dialog').open,true);assert.equal(app.get('share-qr').hidden,false);
+  assert.equal(app.get('share-open').href,published.url);assert.equal(app.get('share-open').hidden,false);
+  assert.deepEqual(app.qrCalls,[published.url]);assert.match(app.get('share-expiry').textContent,/24시간/);
+  assert.equal(app.get('share-retry').hidden,true);
+  await app.click('share-close');
+  app.get('intent-short').value='차분한';app.get('intent-detail').value='A different private note.';
+  await app.get('intent-short').dispatch('input');
+  await app.click('result-close');await app.click('reopen-result');await app.click('share-image');
+  assert.equal(app.imageCalls.length,1,'An intention edit does not change the PNG');
+  assert.equal(app.shareCalls.length,1,'Reopening a valid QR does not publish another object');
+  assert.equal(app.get('share-open').href,published.url);
+  assert.equal(app.calls.length,0,'Sharing does not request AI interpretation');
+});
+
+test('closing or leaving a pending QR upload aborts it and a late response cannot replace a newer QR',async()=>{
+  for (const action of ['share-close','escape','home','new-take']) {
+    const first = deferred();
+    const latest = sharedImage('new-'+action);
+    let uploads = 0;
+    const app = createApp({imageCreate:async()=>new Blob(['trace'],{type:'image/png'}),shareCreate:()=>++uploads===1?first.promise:Promise.resolve(latest)});
+    await finishHandResult(app);
+    const oldClick = app.click('share-image');await flush();
+    assert.equal(app.shareCalls.length,1,action);
+    const signal = app.shareCalls[0].options.signal;
+    assert.equal(app.get('share-image').disabled,true);assert.equal(app.get('share-retry').hidden,true);
+    await app.get('share-image').dispatch('click');assert.equal(app.shareCalls.length,1,'A second click during upload is ignored');
+    if (action==='escape') await app.get('share-dialog').dispatch('cancel');
+    else if (action==='home') await app.click('home');
+    else if (action==='new-take') { await app.click('restart');await app.click('start');await flush(); }
+    else await app.click('share-close');
+    assert.equal(signal.aborted,true,action+' must abort the upload');
+    assert.equal(app.get('share-dialog').open,false,action);
+    if (action==='home') await finishHandResult(app,8);
+    else if (action==='new-take') {
+      const camera=app.cameras.at(-1);camera.tracking();warmupCamera(camera,{hand:true});recordHand(camera,1000,21,8);
+      await app.click('finish');await flush();
+    }
+    await app.click('share-image');
+    assert.equal(app.get('share-open').href,latest.url,action);
+    const status = app.get('share-status').textContent;
+    first.resolve(sharedImage('stale-'+action));await oldClick;await flush();
+    assert.equal(app.get('share-open').href,latest.url,'A superseded response cannot replace the visible QR: '+action);
+    assert.equal(app.get('share-status').textContent,status);
+    assert.equal(app.get('share-qr').hidden,false);assert.equal(app.get('share-image').disabled,false);
+    assert.deepEqual(app.qrCalls,[latest.url]);
+    assert.equal(app.imageCalls.length,['home','new-take'].includes(action)?2:1,'Only a new take gets a new PNG');
+  }
+});
+
+test('closing the QR while its PNG is being generated prevents a later upload and can reuse the finished PNG on retry',async()=>{
+  const generation=deferred();
+  const image=new Blob(['eventually rendered trace'],{type:'image/png'});
+  const app=createApp({imageCreate:()=>generation.promise,shareCreate:async()=>sharedImage('after-close')});
+  await finishHandResult(app);
+  const pending=app.click('share-image');await flush();
+  assert.equal(app.imageCalls.length,1);assert.equal(app.shareCalls.length,0);
+  await app.click('share-close');generation.resolve(image);await pending;await flush();
+  assert.equal(app.get('share-dialog').open,false);assert.equal(app.shareCalls.length,0,'Cancelled generation does not publish when it resolves');
+  assert.equal(app.qrCalls.length,0);
+  await app.click('share-image');
+  assert.equal(app.imageCalls.length,1,'The completed fixed PNG remains reusable for this take');
+  assert.equal(app.shareCalls.length,1);assert.equal(app.shareCalls[0].blob,image);
+  assert.equal(app.get('share-qr').hidden,false);
+});
+
+test('image generation and upload failures both offer a working retry without changing the take',async()=>{
+  for (const failingStep of ['image','upload']) {
+    let renders=0,uploads=0;
+    const image=new Blob(['retryable trace'],{type:'image/png'});
+    const app=createApp({
+      imageCreate:async()=>{if(++renders===1&&failingStep==='image')throw new Error('PNG rendering failed');return image;},
+      shareCreate:async()=>{if(++uploads===1&&failingStep==='upload')throw new Error('Sharing server unavailable');return sharedImage('retried-'+failingStep);},
+    });
+    const recording=await finishHandResult(app);
+    await app.click('share-image');
+    assert.equal(app.get('share-dialog').open,true);assert.equal(app.get('share-qr').hidden,true);
+    assert.equal(app.get('share-open').hidden,true);assert.equal(app.get('share-retry').hidden,false);
+    assert.match(app.get('share-status').textContent,failingStep==='image'?/PNG rendering failed/:/Sharing server unavailable/);
+    assert.equal(app.get('share-image').disabled,false,'Failure clears the in-flight state');
+    await app.click('share-retry');
+    assert.equal(app.get('share-retry').hidden,true);assert.equal(app.get('share-qr').hidden,false);
+    assert.match(app.get('share-open').href,/retried-/);
+    assert.equal(app.imageCalls.length,failingStep==='image'?2:1,'A failed upload reuses its successful image');
+    assert.equal(app.shareCalls.length,failingStep==='image'?1:2);
+    assert.deepEqual(app.imageCalls.at(-1).points,recording.points);
+  }
+});
+
+test('an expired cached QR is replaced only after another explicit phone-sharing action',async()=>{
+  const expired=sharedImage('expired',new Date(Date.now()-60000).toISOString());
+  const fresh=sharedImage('renewed');
+  let uploads=0;
+  const app=createApp({imageCreate:async()=>new Blob(['fixed image'],{type:'image/png'}),shareCreate:async()=>++uploads===1?expired:fresh});
+  await finishHandResult(app);await app.click('share-image');assert.equal(app.get('share-open').href,expired.url);
+  await app.click('share-close');await flush();assert.equal(app.shareCalls.length,1,'Closing or expiry alone never uploads');
+  app.get('intent-short').value='빠른';await app.get('intent-short').dispatch('input');await flush();
+  assert.equal(app.shareCalls.length,1,'Editing intent is not consent to republish an expired image');
+  await app.click('share-image');assert.equal(app.shareCalls.length,2);assert.equal(app.imageCalls.length,1);
+  assert.equal(app.get('share-open').href,fresh.url);assert.deepEqual(app.qrCalls,[expired.url,fresh.url]);
+});
+
+test('phone sharing is blocked outside a result and unavailable modules fail visibly only when requested',async()=>{
+  const app=createApp({imageCreate:async()=>new Blob(['trace'],{type:'image/png'}),shareCreate:async()=>sharedImage('allowed')});
+  await app.get('share-image').dispatch('click');assert.equal(app.imageCalls.length,0);assert.equal(app.get('share-dialog').open,false);
+  const camera=await app.startHand();recordHand(camera);
+  await app.get('share-image').dispatch('click');assert.equal(app.shareCalls.length,0);assert.equal(app.get('share-dialog').open,false);
+  await app.click('finish');await app.click('home');await app.get('share-image').dispatch('click');
+  assert.equal(app.shareCalls.length,0);assert.equal(app.get('share-dialog').open,false);
+  for(const module of ['image','share']) {
+    const missing=createApp(module==='image'?{shareCreate:async()=>sharedImage('unused')}:{imageCreate:async()=>new Blob(['unused'],{type:'image/png'})});
+    await finishHandResult(missing);assert.equal(missing.get('share-dialog').open,false);assert.equal(missing.get('share-status').textContent,'');
+    await missing.click('share-image');assert.equal(missing.get('share-retry').hidden,false);
+    assert.match(missing.get('share-status').textContent,/준비하지 못했어요/);assert.equal(missing.get('share-qr').hidden,true);
+    assert.equal(missing.shareCalls.length,0);
+  }
+});
+
+test('PNG download exports the complete fixed trace and phone sharing reuses it across playback and intention changes',async()=>{
+  const image=new Blob(['full trace PNG'],{type:'image/png'});
+  const app=createApp({imageCreate:async()=>image,shareCreate:async()=>sharedImage('downloaded-trace')});
+  const recording=await finishHandResult(app);
+  app.get('timeline').value='50';await app.get('timeline').dispatch('input');
+  await app.click('export');
+  assert.equal(app.imageCalls.length,1);assert.deepEqual(app.imageCalls[0].points,recording.points);
+  assert.equal(app.imageCalls[0].points.at(-1).t,recording.durationMs,'The last recorded point survives a partial playback cursor');
+  assert.equal(app.imageCalls[0].points.length,21);
+  const download=app.createdElements.filter(element=>element.tagName==='A').at(-1);
+  assert.match(download.download,/^ghosting-.*\.png$/);assert.match(download.href,/^blob:/);
+  assert.match(app.get('export-status').textContent,/PNG.*저장/);assert.equal(app.shareCalls.length,0,'Local download does not upload');
+  app.get('intent-short').value='가벼운';await app.get('intent-short').dispatch('input');
+  await app.click('play');await app.click('play');await app.click('export');await app.click('share-image');
+  assert.equal(app.imageCalls.length,1);assert.equal(app.shareCalls.length,1);assert.equal(app.shareCalls[0].blob,image);
+  await app.runTimers(10000);
 });
