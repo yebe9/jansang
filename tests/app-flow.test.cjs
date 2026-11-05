@@ -804,7 +804,7 @@ test('start UI offers only input modes and discloses automatic private recording
  assert.doesNotMatch(html,/id="(?:ai-consent|video-consent|intent-limit|analysis-badge|save-log)"|data-feeling=/);
  assert.match(html,/<title>잔상:Ghosting - 움직임을 남기는 방법<\/title>/);
  assert.match(html,/<strong class="brand-title">잔상<\/strong><small>TRACES OF MOVEMENT<\/small>/);
- assert.match(html,/소리 없는 영상과 분석 기록을 비공개로 자동 보관/);
+ assert.match(html,/class="capture-note"[^>]*>[^<]*소리 없이[^<]*저장/);
  assert.doesNotMatch(html,/MOVEMENT READING|color-mono|result-color|mono-note|한 가지 색|단색/);
  assert.doesNotMatch(appSource,/motionReport\.local|analysisKind|colorMode|setColor|result-color|mono-note/);
  const app=createApp();assert.equal(app.get('width'),undefined);assert.equal(app.get('show-grid'),undefined);assert.ok(app.get('color-scale'));
