@@ -105,6 +105,7 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
   class Camera {
     constructor(options) {
       this.options = options;
+      this.timeOffset = now + 3000;
       this.stopped = false;
       cameras.push(this);
     }
@@ -128,14 +129,14 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
     stop() { this.stopped = true;lifecycle.push('camera:stop'); }
     tracking() { this.options.onStatus({ kind: 'tracking', message: 'Mock body tracked' }); }
     emit(timestamp, landmarks) {
-      now = timestamp;
-      this.options.onFrame({ timestamp, landmarks });
-      if (animation) animation(timestamp);
+      now = timestamp + this.timeOffset;
+      this.options.onFrame({ timestamp: now, landmarks });
+      if (animation) animation(now);
     }
     emitHands(timestamp, hands) {
-      now = timestamp;
-      this.options.onFrame({ timestamp, landmarks: [], hands });
-      if (animation) animation(timestamp);
+      now = timestamp + this.timeOffset;
+      this.options.onFrame({ timestamp: now, landmarks: [], hands });
+      if (animation) animation(now);
     }
   }
 
@@ -215,7 +216,7 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
       await flush();
       const camera = cameras.at(-1);
       camera.tracking();
-      await elements.get('camera-record').click();
+      warmupCamera(camera);
       return camera;
     },
     async startHand(target = 'indexTip') {
@@ -225,7 +226,7 @@ function createApp({ fetchResponse, cameraStart, recorderStart, recorderStop, po
       const camera = cameras.at(-1);
       await elements.get(target === 'wrist' ? 'hand-wrist' : 'hand-index').click();
       camera.tracking();
-      await elements.get('camera-record').click();
+      warmupCamera(camera, {hand:true});
       return camera;
     },
   };
@@ -272,6 +273,15 @@ function footwork(index, { hideHands = false, showFace = false } = {}) {
     }
   }
   return points;
+}
+
+// Warm-up intentionally ends at 2.9 s: the first real test frame crosses 3 s.
+// Each fake camera adds a monotonic positive offset to this relative clock.
+function warmupCamera(camera, {hand=false}={}) {
+  for(let i=0;i<30;i++) {
+    if(hand) camera.emitHands(-2000+i*100,[{id:1,landmarks:handLandmarks()}]);
+    else camera.emit(-2000+i*100,landmarks());
+  }
 }
 
 function record(camera, start = 1000, count = 21, left = 0.2) {
@@ -386,13 +396,14 @@ test('losing either ankle pauses capture until the whole body returns, without c
 test('occluded hands still allow full-body footwork to be recorded and analyzed', async () => {
   const app = createApp();
   const camera = await app.startWebcam();
-  for (let i = 0; i < 21; i++) camera.emit(1000 + i * 65, footwork(i, { hideHands: true }));
+  camera.emit(1000,footwork(0));
+  for (let i = 1; i < 21; i++) camera.emit(1000 + i * 65, footwork(i, { hideHands: true }));
   await app.click('finish');
   const { input, report } = app.reports.at(-1);
   assert.equal(input.durationMs, 1300);
-  assert.equal(input.points.length, 63, 'Feet and the body center keep their three visible traces');
-  assert.equal(new Set(input.points.map(point => point.stroke)).size, 3);
-  assert.ok(input.poseFrames.every(frame => !frame.joints.leftWrist && !frame.joints.rightWrist));
+  assert.equal(input.points.length, 65, 'The complete start pose has five traces, then feet and center keep three traces');
+  assert.equal(new Set(input.points.map(point => point.stroke)).size, 5);
+  assert.ok(input.poseFrames.slice(1).every(frame => !frame.joints.leftWrist && !frame.joints.rightWrist));
   assert.equal(report.sufficient, true);
   assert.equal(report.payload.metrics.fullBodyRatio, 1);
   assert.ok(report.payload.metrics.lowerBodySpeed > report.payload.metrics.upperBodySpeed);
@@ -422,7 +433,7 @@ test('choosing a camera replaces the stream and ignores old callbacks, then lock
   assert.equal(replacement.requestedDeviceId, 'usb-camera');
   assert.equal(select.value, 'usb-camera');
   replacement.tracking();
-  await app.click('camera-record');
+  warmupCamera(replacement);
   const countBefore = app.get('point-count').textContent;
   original.options.onDevices({
     devices: [{ deviceId: 'old-device', label: 'Stale device' }], selectedDeviceId: 'old-device',
@@ -431,7 +442,7 @@ test('choosing a camera replaces the stream and ignores old callbacks, then lock
   original.emit(500, landmarks());
   assert.equal(select.value, 'usb-camera');
   assert.equal(select.children.length, 3);
-  assert.equal(app.get('camera-status').textContent, 'Mock body tracked');
+  assert.match(app.get('camera-status').textContent, /자동 시작/);
   assert.equal(app.get('camera-retry').hidden, true);
   assert.equal(app.get('point-count').textContent, countBefore, 'Replaced camera cannot append a pose');
 
@@ -459,7 +470,7 @@ test('a failed initial camera connection can be retried without leaving the reco
   assert.equal(app.document.body.dataset.view, 'drawing');
   assert.equal(app.get('camera-status').textContent, 'Camera is busy');
   assert.equal(app.get('camera-retry').hidden, false);
-  assert.equal(app.get('camera-record').disabled, true);
+  assert.equal(app.get('camera-record'), undefined, 'Capture has no manual start button');
 
   await app.click('camera-retry');
   await flush();
@@ -467,10 +478,10 @@ test('a failed initial camera connection can be retried without leaving the reco
   const replacement = app.cameras[1];
   assert.equal(replacement.requestedDeviceId, 'built-in');
   assert.equal(app.get('camera-retry').hidden, true);
-  assert.equal(app.get('camera-record').disabled, true, 'A connected camera still waits for body tracking');
+  assert.equal(app.get('finish').disabled, true, 'A connected camera still waits for three seconds of body tracking');
   replacement.tracking();
-  assert.equal(app.get('camera-record').disabled, false);
-  await app.click('camera-record');
+  assert.equal(app.get('finish').disabled, true);
+  warmupCamera(replacement);
   record(replacement);
   await app.click('finish');
   assert.equal(app.reports.at(-1).input.source, 'webcam');
@@ -493,7 +504,7 @@ test('retrying after a camera error preserves the recorded segment and resumes o
   assert.equal(replacement.requestedDeviceId, 'built-in');
   assert.equal(app.get('point-count').textContent, countBefore);
   assert.equal(app.get('camera-select').disabled, true);
-  assert.equal(app.get('camera-record').hidden, true);
+  assert.equal(app.get('camera-record'), undefined);
   replacement.tracking();
   replacement.emit(4000, landmarks(0.95, 0.05));
   assert.equal(app.get('point-count').textContent, countBefore, 'Reconnecting does not silently resume recording');
@@ -623,7 +634,7 @@ test('default hand mode replaces mouse input and records one fingertip trail wit
   await app.get('canvas').dispatch('pointermove', { pointerId: 1, clientX: 300, clientY: 300 });
   assert.equal(app.get('finish').disabled, true, 'Mouse motion does not create a take');
   camera.tracking();
-  await app.click('camera-record');
+  warmupCamera(camera, {hand:true});
   recordHand(camera);
   await app.click('finish');
   const { input, report } = app.reports.at(-1);
@@ -796,7 +807,8 @@ test('start UI offers only input modes and discloses automatic private recording
  assert.match(html,/소리 없는 영상과 분석 기록을 비공개로 자동 보관/);
  assert.doesNotMatch(html,/MOVEMENT READING|color-mono|result-color|mono-note|한 가지 색|단색/);
  assert.doesNotMatch(appSource,/motionReport\.local|analysisKind|colorMode|setColor|result-color|mono-note/);
- const app=createApp();assert.equal(app.get('width').value,'3');assert.ok(app.get('color-scale'));
+ const app=createApp();assert.equal(app.get('width'),undefined);assert.equal(app.get('show-grid'),undefined);assert.ok(app.get('color-scale'));
+ assert.match(appSource,/strokeWidth\s*=\s*3\.5/);assert.ok(app.get('movement-legend'));assert.ok(app.get('home'));assert.ok(app.get('start-log-link'));
  assert.equal(app.get('analysis-candidates').tagName,'SECTION');
  assert.ok(app.get('intent-examples'));assert.ok(app.get('auto-save-status'));
 });
@@ -1109,7 +1121,8 @@ const logBase = 'https://ghosting-logbook.jansang.workers.dev';
 test('video and results are automatically queued locally and sent only to the authenticated log window',async()=>{
  const app=createApp({logBase,privateStorage:true,automaticAI:true,fetchResponse:async()=>ok(aiResult)});
  const camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
- assert.equal(app.recorders.length,1);assert.equal(app.popups.length,1);
+ assert.equal(app.recorders.length,1);assert.equal(app.popups.length,0,'Preparing and recording must not open the private log automatically');
+ await app.click('log-link');assert.equal(app.popups.length,1);
  assert.match(app.popups[0].url,/capture=1&save=1&auto=1/);
  app.get('intent-short').value='유연한';app.get('intent-detail').value='내 비공개 기록';
  await app.get('intent-short').dispatch('input');await app.runTimers(600);await flush();
@@ -1170,7 +1183,7 @@ test('updated intent creates a newer revision of one recording while a new take 
  const first=[...app.storedLogs.values()][0];const firstID=first.id;
  app.get('intent-short').value='차분한';await app.get('intent-short').dispatch('input');await app.runTimers(600);await flush();
  const revised=app.storedLogs.get(firstID);assert.ok(revised.revision>first.revision);assert.equal(revised.record.intention,'차분한');
- await app.click('restart');camera=await app.startHand();recordHand(camera,5000);await app.click('finish');await flush();
+ await app.click('restart');camera=await app.startHand();recordHand(camera);await app.click('finish');await flush();
  assert.equal(app.storedLogs.size,2);assert.notEqual([...app.storedLogs.values()].at(-1).id,firstID);
 });
 
@@ -1178,7 +1191,7 @@ test('a late recorder rejection cannot replace the fresh take video or save stat
  let rejectStop,calls=0;
  const app=createApp({logBase,privateStorage:true,recorderStop:()=>++calls===1 ? new Promise((_resolve,reject)=>{rejectStop=reject;}) : Promise.resolve(new Blob(['fresh-video'],{type:'video/webm'}))});
  const camera=await app.startHand();recordHand(camera);const finishing=app.click('finish');await flush();await app.click('camera-cancel');
- const freshCamera=await app.startHand();recordHand(freshCamera,5000);await app.click('finish');await flush();
+ const freshCamera=await app.startHand();recordHand(freshCamera);await app.click('finish');await flush();
  const freshStatus=app.get('video-capture-status').textContent;rejectStop(new Error('Old recording failed later'));await finishing;await flush();
  assert.equal(app.get('video-capture-status').textContent,freshStatus);assert.equal(freshStatus,'Mock video ready');assert.equal(app.document.body.dataset.view,'result');
  assert.equal(app.storedLogs.size,1);assert.equal([...app.storedLogs.values()][0].video.size,11);
@@ -1278,4 +1291,111 @@ test('AI TOP 5 order and representative stay fixed across intent changes and OOV
    }
  }
  assert.equal(semanticCalls.length,3);assert.ok(app.calls.every(call=>!call.options.body.includes('차분')));
+});
+
+
+async function prepareAutoCamera(app,{hand=true}={}) {
+  await app.click(hand?'input-hand':'input-webcam');await app.click('start');await flush();
+  const camera=app.cameras.at(-1);camera.tracking();return camera;
+}
+const oneHand=(id=1)=>[{id,landmarks:handLandmarks()}];
+function handFrames(camera,from,to,id=1){for(let t=from;t<=to;t+=100)camera.emitHands(t,oneHand(id));}
+function bodyFrames(camera,from,to,build=()=>landmarks()){for(let t=from;t<=to;t+=100)camera.emit(t,build(t));}
+
+test('a single continuously tracked hand starts automatically at three seconds and the remaining timer is independent of warm-up',async()=>{
+ const app=createApp();const camera=await prepareAutoCamera(app);
+ assert.equal(app.get('camera-record'),undefined);assert.equal(app.recorders.length,0);assert.equal(app.get('finish').disabled,true);
+ handFrames(camera,0,2900,7);
+ assert.equal(app.recorders.length,0,'2.9 seconds must not start video or movement recording');assert.equal(app.get('finish').disabled,true);
+ assert.match(app.get('record-time').textContent,/10\.0/,'Recognition warm-up is outside the ten-second recording');
+ camera.emitHands(3000,oneHand(7));assert.equal(app.recorders.length,1);assert.equal(app.get('finish').disabled,false);
+ assert.match(app.get('stage-status').textContent,/REC/);assert.match(app.get('record-time').textContent,/10\.0/);
+ camera.emitHands(4300,oneHand(7));assert.match(app.get('record-time').textContent,/0?8\.7/);
+ await app.click('pause');const frozen=app.get('record-time').textContent;camera.emitHands(6000,oneHand(7));assert.equal(app.get('record-time').textContent,frozen,'Manual pause never silently restarts');
+ await app.click('finish');assert.equal(app.reports.at(-1).input.durationMs,1300,'The three-second preparation is excluded');
+});
+
+test('one stale frame and a long frame gap cannot satisfy continuous hand recognition',async()=>{
+ const app=createApp();const camera=await prepareAutoCamera(app);
+ camera.emitHands(0,oneHand());app.setTime(camera.timeOffset+4000);await app.runTimers(3000);
+ assert.equal(app.recorders.length,0,'Elapsed wall time without new observations must not start');
+ handFrames(camera,4000,6900);assert.equal(app.recorders.length,0,'A long gap begins a new three-second interval');
+ camera.emitHands(7000,oneHand());assert.equal(app.recorders.length,1);
+});
+
+test('lost hand frames and hand identity replacement reset the start countdown while a persistent hand survives a second hand entering',async()=>{
+ const app=createApp();const camera=await prepareAutoCamera(app);
+ handFrames(camera,0,1400,1);handFrames(camera,1500,2900,2);handFrames(camera,3000,4400,1);
+ assert.equal(app.recorders.length,0,'Alternating hands cannot pool different tracks into three seconds');
+ camera.emitHands(4500,[]);handFrames(camera,4600,7500,1);assert.equal(app.recorders.length,0,'A no-hand frame resets an otherwise long observation');
+ camera.emitHands(7600,[...oneHand(1),...oneHand(2)]);assert.equal(app.recorders.length,1,'The same first hand can complete its countdown while the other enters');
+});
+
+test('all fourteen full-body anchors must stay visible for three seconds before automatic start',async()=>{
+ const required=[11,12,13,14,15,16,23,24,25,26,27,28,31,32];
+ for(const missing of required){
+  const app=createApp();const camera=await prepareAutoCamera(app,{hand:false});bodyFrames(camera,0,2500);
+  const partial=landmarks();partial[missing].visibility=.49;camera.emit(2600,partial);
+  bodyFrames(camera,2700,5600);assert.equal(app.recorders.length,0,'Missing anchor '+missing+' resets the initial countdown');
+  camera.emit(5700,landmarks());assert.equal(app.recorders.length,1,'A new complete interval can start after anchor '+missing+' returns');
+ }
+});
+
+test('optional fingers, heels and face landmarks do not block full-body automatic start',async()=>{
+ const app=createApp();const camera=await prepareAutoCamera(app,{hand:false});
+ bodyFrames(camera,0,3000,()=>{const points=landmarks();for(const joint of [0,1,2,3,4,5,6,7,8,9,10,17,18,19,20,21,22,29,30])points[joint].visibility=0;return points;});
+ assert.equal(app.recorders.length,1);assert.equal(app.get('finish').disabled,false);
+});
+
+test('changing cameras discards the old recognition countdown and rejects stale callbacks',async()=>{
+ const app=createApp();const original=await prepareAutoCamera(app);handFrames(original,0,2900);
+ app.get('camera-select').value='usb-camera';await app.get('camera-select').dispatch('change');await flush();
+ const replacement=app.cameras.at(-1);assert.notEqual(replacement,original);assert.equal(original.stopped,true);replacement.tracking();
+ original.options.onFrame({timestamp:original.timeOffset+3100,landmarks:[],hands:oneHand()});assert.equal(app.recorders.length,0);
+ handFrames(replacement,0,2900);assert.equal(app.recorders.length,0);replacement.emitHands(3000,oneHand());assert.equal(app.recorders.length,1);
+});
+
+test('camera errors require a new complete recognition interval after reconnection',async()=>{
+ const app=createApp();const original=await prepareAutoCamera(app);handFrames(original,0,2900);
+ original.options.onStatus({kind:'error',message:'Disconnected before start'});assert.equal(app.recorders.length,0);
+ await app.click('camera-retry');await flush();const replacement=app.cameras.at(-1);replacement.tracking();
+ handFrames(replacement,0,2900);assert.equal(app.recorders.length,0);replacement.emitHands(3000,oneHand());assert.equal(app.recorders.length,1);
+});
+
+test('a hidden page cannot complete recognition and foreground return requires a fresh interval',async()=>{
+ const app=createApp();const camera=await prepareAutoCamera(app);handFrames(camera,0,2900);
+ app.document.hidden=true;await app.document.dispatch('visibilitychange');handFrames(camera,3000,6100);assert.equal(app.recorders.length,0);
+ app.document.hidden=false;await app.document.dispatch('visibilitychange');handFrames(camera,6200,9100);assert.equal(app.recorders.length,0);
+ camera.emitHands(9200,oneHand());assert.equal(app.recorders.length,1);
+});
+
+test('the home brand cancels the preparation and a later visit does not inherit its countdown',async()=>{
+ const app=createApp();const camera=await prepareAutoCamera(app);handFrames(camera,0,2900);await app.click('home');
+ assert.equal(camera.stopped,true);assert.equal(app.document.body.dataset.view,'intro');assert.equal(app.get('start-dialog').open,true);
+ camera.emitHands(3000,oneHand());assert.equal(app.recorders.length,0);
+ const fresh=await prepareAutoCamera(app);handFrames(fresh,0,2900);assert.equal(app.recorders.length,0);fresh.emitHands(3000,oneHand());assert.equal(app.recorders.length,1);
+});
+
+test('private record windows open only from the explicit lock links, including the start dialog lock',async()=>{
+ for(const lock of ['log-link','start-log-link']){
+  const app=createApp({logBase,privateStorage:true});assert.equal(app.popups.length,0);await app.click(lock);assert.equal(app.popups.length,1);
+  const camera=await app.startHand();recordHand(camera);assert.equal(app.popups.length,1,'Camera preparation and automatic recording do not create another window');
+ }
+});
+
+
+test('returning home while camera startup is pending rejects its delayed readiness and pose callbacks',async()=>{
+ let resolveStart;const app=createApp({cameraStart:()=>new Promise(resolve=>{resolveStart=resolve;})});
+ await app.click('start');await flush();const camera=app.cameras.at(-1);await app.click('home');
+ assert.equal(camera.stopped,true);assert.equal(app.document.body.dataset.view,'intro');resolveStart(true);await flush();
+ camera.tracking();handFrames(camera,0,4000);
+ assert.equal(app.document.body.dataset.view,'intro');assert.equal(app.get('start-dialog').open,true);assert.equal(app.recorders.length,0);assert.equal(app.get('finish').disabled,true);
+});
+
+test('returning home cancels the old interpretation and never renders its late response',async()=>{
+ let resolve;const app=createApp({automaticAI:true,fetchResponse:()=>new Promise(done=>{resolve=done;})});
+ const camera=await app.startHand();recordHand(camera);await app.click('finish');assert.equal(app.get('analysis-dialog').open,true);
+ await app.click('analysis-cancel');await app.click('home');assert.equal(app.calls[0].options.signal.aborted,true);
+ resolve(ok(aiResult));await flush();
+ assert.equal(app.document.body.dataset.view,'intro');assert.equal(app.get('result-dialog').open,false);assert.equal(app.get('analysis-dialog').open,false);assert.equal(app.get('analysis-qualities').children.length,0);assert.equal(app.get('ai-word').textContent,'움직임을 기다려요');
 });

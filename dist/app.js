@@ -9,6 +9,15 @@
   const analysisDialog = $('analysis-dialog');
   const workspace = $('workspace');
   const LIMIT = 10000;
+  const AUTO_START_MS = 3000;
+  const AUTO_START_MAX_GAP_MS = 350;
+  const AUTO_START_BODY_JOINTS = [
+    'leftShoulder','rightShoulder','leftElbow','rightElbow','leftWrist','rightWrist',
+    'leftHip','rightHip','leftKnee','rightKnee','leftAnkle','rightAnkle','leftFootIndex','rightFootIndex'
+  ];
+  const autoStartTracks = new Map();
+  let autoStartElapsed = 0;
+  let autoStartLastFrame = null;
   let points = []; // { x, y, t, speed, stroke }
   let view = 'intro';
   let mode = 'idle';
@@ -20,7 +29,7 @@
   let lastFrame = 0;
   let stroke = 0;
   let captureAspect = 1;
-  let strokeWidth = 3;
+  const strokeWidth = 3.5;
   let playbackRate = 1;
   let dirty = true;
   let intendedFeeling = '';
@@ -237,14 +246,13 @@
     $('reopen-result').hidden = !result || resultDialog.open;
     $('record-dock').hidden = next !== 'drawing';
     $('drawing-hint').hidden = next !== 'drawing';
-    $('tool-rail').hidden = next !== 'drawing';
+    $('movement-legend').hidden = next !== 'drawing';
     $('intro-action').hidden = next !== 'intro';
     $('camera-panel').hidden = next !== 'drawing' || !isCameraInput();
     for(const [id,active] of [['step-start',next==='intro'],['step-draw',next==='drawing'],['step-result',result]]) {
       if(active) $(id).setAttribute('aria-current','step');
       else $(id).removeAttribute('aria-current');
     }
-    closeSettings(false);
     resize();
   }
 
@@ -304,7 +312,9 @@
     $('video-capture-status').textContent = videoMessage;
     $('video-capture-status').hidden = view !== 'drawing';
     $('auto-save-status').textContent = autoSaveMessage || '기록한 영상과 결과를 이 기기에 먼저 자동 보관합니다.';
-    $('log-connect').hidden = privateLogs?.authenticated === true || !['queued','connecting','error'].includes(autoSaveKind);
+    $('log-connect').hidden = true;
+    const label = autoSaveKind === 'error' ? '비공개 기록함 · 보관 상태 확인' : '비공개 기록함';
+    for (const id of ['log-link','start-log-link']) { $(id).setAttribute('aria-label',label); $(id).setAttribute('title',label); }
   }
 
   function resetCaptureLog() {
@@ -377,8 +387,10 @@
     const base=window.JANSANG_CONFIG?.logBase;
     if(!base||!window.GhostingPrivateLogs){autoSaveMessage='자동 보관을 준비하지 못했어요. 새로고침해 주세요.';return;}
     privateLogs=new window.GhostingPrivateLogs.Client({base,win:window,onState(state){autoSaveMessage=state.message;autoSaveKind=state.kind;updateLogUI();}});
-    $('log-link').href=new URL('/logs/',base).href;$('log-link').hidden=false;
-    $('log-link').addEventListener('click',event=>{event.preventDefault();privateLogs.prepare();});
+    for (const id of ['log-link','start-log-link']) {
+      $(id).href=new URL('/logs/',base).href;$(id).hidden=false;
+      $(id).addEventListener('click',event=>{event.preventDefault();privateLogs.prepare();});
+    }
     $('log-connect').addEventListener('click',()=>privateLogs.prepare());
   }
 
@@ -599,16 +611,17 @@
     $('start').disabled = lost;
     $('example').disabled = lost;
     $('dialog-error').hidden = !lost;
-    $('settings-toggle').disabled = lost;
+
     $('play').disabled = lost || !hasPoints;
     $('timeline').disabled = lost || !hasPoints;
     $('export').disabled = lost || !hasPoints;
     $('playback-speed').disabled = lost || !hasPoints;
-    $('pause-icon').textContent = mode === 'paused' ? '▶' : 'Ⅱ';
+    $('pause-icon').dataset.state = mode === 'paused' ? 'paused' : 'recording';
+    $('pause').setAttribute('aria-label',mode === 'paused' ? '이어 기록' : '일시정지');
     $('pause-label').textContent = mode === 'paused' ? '이어 기록' : '일시정지';
-    $('record-time').textContent = timestamp(cursor);
+    $('record-time').textContent = timestamp(LIMIT - cursor);
     $('record-progress').value = cursor;
-    $('play-icon').textContent = mode === 'playing' ? 'Ⅱ' : '▶';
+    $('play-icon').dataset.state = mode === 'playing' ? 'playing' : 'paused';
     $('play').setAttribute('aria-label',mode === 'playing' ? '재생 일시정지' : '움직임 재생');
     $('current-time').textContent = timestamp(cursor);
     $('total-time').textContent = timestamp(duration);
@@ -630,7 +643,7 @@
       const hand = captureSource === 'hand';
       if (mode === 'armed') $('stage-status').textContent = cameraRequested
         ? (hand ? 'TRACKING / 손을 찾으면 이어서 기록합니다' : 'TRACKING / 몸을 찾으면 이어서 기록합니다')
-        : 'READY / 자세를 잡고 기록을 시작하세요';
+        : 'READY / 3초 연속 인식하면 자동 시작';
       $('camera-mode-label').textContent = hand ? 'LIVE / HANDS' : 'LIVE / FULL BODY';
       $('hand-targets').hidden = !hand;
       $('hand-count').hidden = !hand;
@@ -645,9 +658,10 @@
       $('drawing-hint').textContent = hand
         ? `양손의 ${handTargetLabel()}으로 공중에 그려보세요 · 두 손이 모두 안 보이면 잠시 멈춤`
         : '양손·양발·몸의 중심으로 잔상을 남겨보세요 · 전신이 보여야 기록됩니다';
-      $('camera-status').textContent = cameraMessage;
-      $('camera-record').hidden = cameraRequested || points.length > 0;
-      $('camera-record').disabled = !cameraReady || cameraKind !== 'tracking' || lost;
+      $('camera-status').textContent = !cameraRequested && cameraReady && cameraKind !== 'error'
+        ? (autoStartElapsed > 0 ? Math.ceil((AUTO_START_MS-autoStartElapsed)/1000)+'초 뒤 자동 시작합니다.'
+          : hand ? '한 손 이상을 3초 동안 보여주면 자동으로 시작합니다.' : '어깨부터 발끝까지 3초 동안 보이면 자동으로 시작합니다.')
+        : cameraMessage;
       $('camera-select').disabled = cameraKind === 'loading' || hasPoints || cameraRequested;
       $('camera-retry').hidden = cameraKind !== 'error';
       $('camera-switch-note').textContent = hasPoints
@@ -665,12 +679,22 @@
         : '움직임을 만날 준비 중';
       $('guide-copy').textContent = cameraKind === 'error' ? '왼쪽에서 카메라를 바꾸거나 다시 연결할 수 있어요.'
         : cameraRequested ? (captureSource === 'hand' ? '손을 화면 안으로 옮겨주세요. 한 손 이상 보이면 시간이 흐릅니다.' : '어깨부터 양발까지 화면 안으로 옮겨주세요. 인식되면 시간이 흐릅니다.')
-        : '미리보기에서 자세를 잡고 ‘10초 기록 시작’을 눌러주세요.';
+        : (autoStartElapsed > 0 ? Math.ceil((AUTO_START_MS-autoStartElapsed)/1000)+'초 뒤 자동 시작'
+          : captureSource === 'hand' ? '한 손 이상을 3초 동안 보여주세요. 버튼 없이 시작합니다.' : '어깨부터 발끝까지 3초 동안 보여주세요. 버튼 없이 시작합니다.');
     } else {
       $('guide-title').textContent = '움직임으로 채워질 공간';
       $('guide-copy').textContent = '작은 움직임 하나면 충분해요.';
     }
     updateLogUI();
+  }
+
+  function goHome() {
+    pauseRecording();
+    stopCamera();
+    clearAnalysis();
+    points=[];poseFrames=[];jointTracks.clear();poseSegment=0;
+    isExample=false;elapsed=0;cursor=0;duration=LIMIT;stroke=0;mode='idle';
+    resetFeelings();setView('intro');refresh();render();openStart();
   }
 
   function openStart() {
@@ -688,7 +712,6 @@
     stopCamera();
     clearAnalysis();
     videoOptIn = true;
-    privateLogs?.prepare();
     window.GhostingSemantic?.load().catch(()=>{});
     if (videoOptIn) videoMessage = '영상과 결과를 이 기기에 자동 보관하고, 개인 기록함 로그인 후 온라인에도 동기화합니다.';
     dialog.close();
@@ -709,16 +732,18 @@
   }
 
   function setInputMode(next) {
+    resetAutoStart();
     inputMode = next;
     $('input-hand').setAttribute('aria-pressed', String(next === 'hand'));
     $('input-webcam').setAttribute('aria-pressed', String(next === 'webcam'));
     $('input-help').textContent = next === 'webcam'
-      ? '어깨부터 양발까지 화면에 보이도록 자세를 잡아주세요.'
-      : '양손을 함께 보여주세요. 각 손의 검지 끝 또는 손목으로 공중에 그립니다.';
+      ? '어깨부터 발끝까지 3초 동안 보이면 자동으로 시작합니다.'
+      : '한 손 이상을 3초 동안 보여주면 자동으로 시작합니다.';
     $('start').firstChild.textContent = '웹캠 준비하기 ';
   }
 
   function stopCamera() {
+    resetAutoStart();
     camera?.stop();
     camera = null;
     cameraReady = false;
@@ -729,6 +754,7 @@
   }
 
   async function startCamera() {
+    resetAutoStart();
     const id = takeId;
     camera?.stop();
     invalidateVideoCapture('카메라가 다시 연결되어 이번 영상 보관을 중단했어요. 움직임과 분석 결과는 저장할 수 있습니다.');
@@ -766,6 +792,7 @@
           if (id !== takeId || camera !== current || view !== 'drawing') return;
           cameraKind = status.kind;
           cameraMessage = status.message;
+          if (status.kind !== 'tracking') resetAutoStart();
           if (status.kind === 'error') {
             pauseRecording();
             invalidateVideoCapture('카메라 연결이 끊겨 이번 영상을 보관하지 못했어요. 움직임과 분석 결과는 저장할 수 있습니다.');
@@ -787,13 +814,30 @@
       if (id !== takeId || camera !== current) return;
       cameraMessage = error.message;
       cameraKind = 'error';
+      resetAutoStart();
       cameraReady = false;
     }
     refresh();
   }
 
+  function resetAutoStart() {
+    autoStartTracks.clear();autoStartElapsed=0;autoStartLastFrame=null;
+  }
+
+  function qualifyingStart(keys, now) {
+    if (!Number.isFinite(now) || !keys.length) { resetAutoStart();return false; }
+    if (autoStartLastFrame !== null && (now <= autoStartLastFrame || now-autoStartLastFrame > AUTO_START_MAX_GAP_MS)) resetAutoStart();
+    const visible=new Set(keys);
+    for (const key of autoStartTracks.keys()) if(!visible.has(key)) autoStartTracks.delete(key);
+    for (const key of visible) if(!autoStartTracks.has(key)) autoStartTracks.set(key,now);
+    autoStartLastFrame=now;
+    autoStartElapsed=Math.max(0,...[...autoStartTracks.values()].map(start=>now-start));
+    return autoStartElapsed >= AUTO_START_MS;
+  }
+
   function receivePose({landmarks = [], worldLandmarks = [], hands = [], timestamp:now}) {
     if (view !== 'drawing' || !isCameraInput()) return;
+    if (document.hidden || !Number.isFinite(now)) { resetAutoStart();return; }
     const hand = captureSource === 'hand';
     const jointIndices = hand ? {
       wrist:0,thumbCmc:1,thumbMcp:2,thumbIp:3,thumbTip:4,
@@ -811,7 +855,7 @@
       const joints = {};
       for (const [name,index] of Object.entries(jointIndices)) {
         const p = raw?.[index];
-        if (p && p.visibility >= .5 && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+        if (p && p.visibility >= .5 && Number.isFinite(p.x) && Number.isFinite(p.y) && p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1) {
           joints[name] = [clamp(p.x,0,1), clamp(p.y,0,1)];
         }
       }
@@ -832,8 +876,16 @@
         refresh();
       }
     }
-    if (!cameraRequested || lost || mode === 'paused' || !$('settings').hidden) return;
+    if (lost || mode === 'paused' || mode === 'finalizing' || !cameraReady) { resetAutoStart();return; }
     const joints = hand ? null : readJoints(landmarks);
+    if (!cameraRequested) {
+      const keys=hand ? observedHands.map(item=>item.id)
+        : AUTO_START_BODY_JOINTS.every(name=>joints[name]) ? ['body'] : [];
+      if (!qualifyingStart(keys,now)) { refresh();return; }
+      cameraRequested=true;
+      resetAutoStart();
+      announce('3초 동안 인식되어 10초 기록을 시작합니다.');
+    }
     const tracked = hand ? observedHands.length > 0
       : ['leftShoulder','rightShoulder','leftHip','rightHip','leftAnkle','rightAnkle'].every(name => joints[name]);
     if (!tracked) {
@@ -904,7 +956,6 @@
   function togglePause() {
     if(lost || view!=='drawing' || !points.length) return;
     if(mode==='paused') {
-      closeSettings(false);
       mode='armed';refresh();
       canvas.focus({preventScroll:true});
       announce(captureSource === 'hand' ? '손이 인식되면 남은 시간 동안 기록을 이어갑니다.' : '몸이 인식되면 남은 시간 동안 기록을 이어갑니다.');
@@ -966,23 +1017,6 @@
     announce('움직임을 기록했습니다. 의도한 느낌을 남기고 비교 화면을 살펴보세요.');
   }
 
-  function closeSettings(restoreFocus=true) {
-    const wasOpen=!$('settings').hidden;
-    $('settings').hidden=true;
-    $('settings-toggle').setAttribute('aria-expanded','false');
-    if(wasOpen && restoreFocus) $('settings-toggle').focus();
-  }
-
-  function toggleSettings() {
-    if(lost || view!=='drawing') return;
-    if(!$('settings').hidden) { closeSettings();return; }
-    if(mode==='recording' || (isCameraInput() && mode==='armed' && points.length)) pauseRecording();
-    if(view!=='drawing') return;
-    $('settings').hidden=false;
-    $('settings-toggle').setAttribute('aria-expanded','true');
-    $('settings-close').focus();
-  }
-
   function togglePlayback() {
     if(lost || view!=='result' || !points.length) return;
     if(mode==='playing') {
@@ -1016,6 +1050,8 @@
     resetFeelings();showResult();
   }
 
+  $('home').addEventListener('click',goHome);
+  $('result-home').addEventListener('click',goHome);
   $('open-start').addEventListener('click',openStart);
   $('restart').addEventListener('click',openStart);
   $('result-close').addEventListener('click',()=>closeResult());
@@ -1031,6 +1067,7 @@
     $(id).addEventListener('click',()=>{
       if (view !== 'drawing' || captureSource !== 'hand' || points.length || cameraRequested) return;
       handTarget = target;
+      resetAutoStart();
       refresh();
     });
   }
@@ -1043,28 +1080,10 @@
     if (view !== 'drawing' || !isCameraInput() || cameraKind !== 'error') return;
     startCamera();
   });
-  $('camera-record').addEventListener('click',()=>{
-    if (!cameraReady || cameraKind !== 'tracking') return;
-    closeSettings(false);
-    cameraRequested = true;
-    mode = 'armed';
-    refresh();
-    canvas.focus({preventScroll:true});
-    announce(captureSource === 'hand' ? '손이 인식되면 10초의 움직임을 기록합니다.' : '몸이 인식되면 10초의 움직임을 기록합니다.');
-  });
-  $('camera-cancel').addEventListener('click',()=>{
-    pauseRecording();
-    stopCamera();
-    clearAnalysis();
-    mode='idle';
-    setView('intro');
-    openStart();
-  });
+  $('camera-cancel').addEventListener('click',goHome);
   $('example').addEventListener('click',loadExample);
   $('pause').addEventListener('click',togglePause);
   $('finish').addEventListener('click',finishRecording);
-  $('settings-toggle').addEventListener('click',toggleSettings);
-  $('settings-close').addEventListener('click',()=>closeSettings());
   $('play').addEventListener('click',togglePlayback);
   $('timeline').addEventListener('input',()=>{
     if(view!=='result') return;
@@ -1072,10 +1091,6 @@
     $('result-caption').textContent='선택한 순간의 잔상입니다. 재생 버튼을 누르면 이어집니다.';
   });
   $('playback-speed').addEventListener('change',event=>{ playbackRate=Number(event.target.value); });
-  $('width').addEventListener('input',event=>{
-    strokeWidth=Number(event.target.value);$('width-value').textContent=strokeWidth;dirty=true;render();
-  });
-  $('show-grid').addEventListener('change',event=>{ $('grid').hidden=!event.target.checked; });
   $('intent-short').addEventListener('compositionstart',()=>{ intentComposing = true; });
   $('intent-short').addEventListener('compositionend',()=>{ intentComposing = false; commitIntent(); });
   $('intent-short').addEventListener('input',event=>{ if (!event.isComposing) commitIntent(); });
@@ -1094,10 +1109,9 @@
   });
 
   // 팝업은 native dialog가 포커스를 가두고 Escape 닫기를 처리한다.
-  // 설정 메뉴는 Escape로 닫고, 기록/결과 단축키는 각각 해당 화면에서만 동작한다.
+  // 기록/결과 단축키는 각각 해당 화면에서만 동작한다.
   document.addEventListener('keydown',event=>{
     if(dialog.open || analysisDialog.open || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
-    if(event.code==='Escape' && !$('settings').hidden) { event.preventDefault();closeSettings();return; }
     if(/^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(event.target.tagName) || event.target.isContentEditable) return;
     if(event.code==='Space') {
       event.preventDefault();
@@ -1108,6 +1122,7 @@
     if(event.code==='KeyR' && view!=='drawing') { event.preventDefault();openStart(); }
   });
   document.addEventListener('visibilitychange',()=>{
+    resetAutoStart();
     if(!document.hidden) return;
     if(mode==='recording' || (isCameraInput() && mode==='armed' && cameraRequested)) {
       if(points.length) pauseRecording();
@@ -1144,6 +1159,9 @@
   });
   function failGL() { lost=true;$('stage-error').hidden=false;refresh(); }
   function frame(now) {
+    if(view==='drawing' && !cameraRequested && autoStartLastFrame!==null && now-autoStartLastFrame>AUTO_START_MAX_GAP_MS) {
+      resetAutoStart();refresh();
+    }
     if(!lost && mode==='recording') {
       cursor=recordTime(now);dirty=true;
       if(cursor>=LIMIT) finishRecording();
